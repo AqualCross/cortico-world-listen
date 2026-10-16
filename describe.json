@@ -1,0 +1,100 @@
+{
+  "tools": [
+    {
+      "name": "listen",
+      "description": "Turn the Hearing world on or off. \"start\" begins capturing system audio (or one application) and delivers speech chunks as events; \"stop\" ends it. Each chunk arrives as an event with a WAV attachment; hand its handle to stt_transcribe when you want the words.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "start",
+              "stop"
+            ],
+            "description": "start = begin listening, stop = end it."
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "system",
+              "app"
+            ],
+            "description": "Overrides the configured source: system audio or one application."
+          },
+          "app": {
+            "type": "string",
+            "description": "When source=app: the process name (for example chrome.exe) or a PID. Defaults to the configured application."
+          },
+          "minutes": {
+            "type": "integer",
+            "description": "Auto-stop after this many minutes; 0 uses the configured value."
+          }
+        },
+        "required": [
+          "action"
+        ]
+      },
+      "tags": [
+        "act"
+      ],
+      "summary": {
+        "zh": "打开或关掉听觉：开始/停止监听系统声音或某个应用的音频。",
+        "en": "Turn hearing on or off: start/stop listening to system audio or one application."
+      }
+    },
+    {
+      "name": "listen_recent",
+      "description": "List the most recently heard speech chunks: time, duration, source and the attachment handle. Hand a handle to stt_transcribe to get text.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "limit": {
+            "type": "integer",
+            "description": "How many chunks to list (1-50); default 10."
+          }
+        }
+      },
+      "tags": [
+        "read"
+      ],
+      "summary": {
+        "zh": "看最近听到的语音块及其附件句柄。",
+        "en": "List the most recently heard speech chunks and their attachment handles."
+      }
+    },
+    {
+      "name": "listen_status",
+      "description": "Hearing status: listening or not, the target, counters, segmentation settings and the last error.",
+      "parameters": {
+        "type": "object",
+        "properties": {}
+      },
+      "tags": [
+        "read"
+      ],
+      "summary": {
+        "zh": "听觉的状态：是否在听、目标、计数与最近错误。",
+        "en": "Hearing status: listening, target, counters and the last error."
+      }
+    }
+  ],
+  "events": [
+    {
+      "type": "listen.chunk",
+      "description": {
+        "zh": "听到一段语音：正文说明时长与来源，附件是一段 WAV 音频块，可直接交给 stt_transcribe 转写。",
+        "en": "A speech chunk was heard: the text carries duration and source; the attachment is a WAV chunk that can be handed to stt_transcribe."
+      },
+      "trigger": "debounce"
+    }
+  ],
+  "prompts": [
+    {
+      "key": "worlds.listen.env",
+      "title": "听觉",
+      "role": "envPrompt",
+      "content": "### 听觉\n\n现在在听：**{{listen.target}}**（{{listen.mode}}）。声音被自动切成一块块语音，每块以 `listen.chunk` 事件出现：正文是一行说明（时长、来源），后面跟着一行 `[blob log:….wav audio/wav …]`——那是这一块的音频附件。\n\n- **要文字时**：把附件的 `log:` 句柄交给 `stt_transcribe`（例如 `{\"audio\":\"log:xxxx.wav\"}`），转写结果会在回执里。\n- **挑着转**：只转你判断重要的块，不要每一块都转；不转的块留着就行（事件库里还在）。\n- **别把自己听进去**：{{listen.target}} 里可能包含你自己正在说的话或放出的声音（尤其系统声音）；那是你自己的，不是对方说的。\n- 手里的工具：`listen_recent` 看最近听到的块；`listen` 开关听觉（开之前先确认使用者确实想让你听）；`listen_status` 看状态。\n"
+    }
+  ]
+}
