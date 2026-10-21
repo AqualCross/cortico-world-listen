@@ -12,6 +12,7 @@ import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, statSync } from 'node:fs';
 import { isAbsolute, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { listApps as listAppsDefault, resolveApp as resolveAppDefault } from './apps.js';
 import { Capturer, captureModuleStatus } from './capture.js';
@@ -23,6 +24,9 @@ import { encodeWav, formatKb, formatSeconds } from './wav.js';
 
 const msg = (err) => (err instanceof Error ? err.message : String(err));
 const asText = (value) => (typeof value === 'string' ? value.trim() : '');
+
+/** 环境提示词模板：按本模块位置解析，不依赖宿主递来的 packageDir（那是 bot 的代码包目录）。 */
+const ENV_PROMPT = fileURLToPath(new URL('./ENV_PROMPT.md', import.meta.url));
 
 /** 全部工具的声明（不含 handler）；定义里的 describe 与 `tools()` 都取它。 */
 export const LISTEN_TOOL_DECLS = [
@@ -722,7 +726,7 @@ export class ListenWorld {
         key: `worlds.${ID}.env`,
         title: t.label,
         description: '听觉的环境段：现在是否在听、语音块事件形状与转写接力（只在听着时出现）。',
-        path: join(this.packageDir, 'src', 'ENV_PROMPT.md'),
+        path: ENV_PROMPT,
         role: 'envPrompt',
         vars: [
           { name: 'listen.state', description: '听觉的开/关（关着时整段不出现）' },

@@ -657,6 +657,25 @@ try {
   // -------------------------------------------------------------------------
   console.log('World 整条链（假采集 / 假宿主 / 假时钟）');
 
+  check('create() 用本扩展自己的包目录，不信任宿主递来的 packageDir', () => {
+    // 宿主 create(ctx) 递来的 packageDir 是 bot 的代码包目录；包内资产查找不能拿它拼
+    const world = def.create({ cfg: def.defaults(), dataDir: scratch, botDir: join(scratch, 'bot'), packageDir: join(scratch, 'bot') });
+    eq(world.packageDir.replace(/[\\/]+$/, ''), pkgDir.replace(/[\\/]+$/, ''), 'packageDir 应解析到本扩展根目录');
+  });
+
+  check('环境提示词模板路径不随宿主 packageDir 跑偏', () => {
+    const world = new ListenWorld({
+      cfg: def.defaults(),
+      dataDir: join(scratch, 'envp'),
+      botDir: join(scratch, 'bot'),
+      packageDir: join(scratch, 'bot'),
+    });
+    const doc = (world.webUi('zh').promptDocs ?? []).find((d) => d.role === 'envPrompt');
+    assert(doc, '缺环境提示词声明');
+    assert(existsSync(doc.path), `模板找不到：${doc.path}`);
+    assert(doc.path.replace(/\\/g, '/').startsWith(pkgDir.replace(/\\/g, '/')), `模板不在本扩展目录下：${doc.path}`);
+  });
+
   await checkAsync('工具形状与声明', async () => {
     const rig = makeWorld();
     const world = rig.world;
