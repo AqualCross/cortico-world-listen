@@ -4,7 +4,7 @@
  * 和 TTS 世界的「语音仓库」同一套做法：本进程写、索引常驻内存、落盘走
  * 「写临时文件再 rename」；索引坏了或文件被外部删了不抛错，静默当空/跳过。
  *
- * 与 TTS 的一点不同：每条记录带一个递增的 `seq`，面板与 `listen_recent`
+ * 与 TTS 的一点不同：每条记录带一个递增的 `seq`，面板与 `listen_read action=recent`
  * 用它编号；重启后从现存记录接下去数（清空后从 1 重来）。
  */
 import { randomBytes } from 'node:crypto';

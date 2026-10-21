@@ -8,14 +8,19 @@
  * 根里再优先有窗口标题的（浏览器的主进程通常挂着窗口），最后退到最小 PID。
  */
 import { execFile } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 
 const NAME_OK = /^[A-Za-z0-9._ -]+$/;
 
+const sessionSource = fileURLToPath(new URL('./audio-sessions.cs', import.meta.url)).replace(/'/g, "''");
 const LIST_SCRIPT = [
   '[Console]::OutputEncoding=[System.Text.Encoding]::UTF8',
   '$OutputEncoding=[System.Text.Encoding]::UTF8',
-  '$items = Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowTitle } | Group-Object ProcessName | ForEach-Object { [pscustomobject]@{ name=$_.Name; pid=($_.Group | Sort-Object Id | Select-Object -First 1).Id; title=($_.Group | Select-Object -First 1).MainWindowTitle } }',
-  '@($items) | ConvertTo-Json -Compress',
+  '$ErrorActionPreference="Stop"',
+  `$audioIds = @(); $audioError = ''; try { Add-Type -Path '${sessionSource}'; $audioIds = @([ListenAudioSessions]::Read()) } catch { $audioError = $_.Exception.Message }`,
+  '$titles = @{}; Get-Process -ErrorAction SilentlyContinue | ForEach-Object { $titles[[int]$_.Id] = [string]$_.MainWindowTitle }',
+  '$items = @(Get-CimInstance Win32_Process | ForEach-Object { [pscustomobject]@{ name=([string]$_.Name -replace "\\.exe$", ""); pid=[int]$_.ProcessId; parent=[int]$_.ParentProcessId; title=[string]$titles[[int]$_.ProcessId]; audio=($audioIds -contains [uint32]$_.ProcessId) } })',
+  '[pscustomobject]@{ processes=$items; audioError=$audioError } | ConvertTo-Json -Compress -Depth 4',
 ].join('; ');
 
 /** 查一个进程名的全部实例（PID、父 PID、窗口标题）。 */
@@ -66,19 +71,41 @@ function parseJson(text) {
 }
 
 /**
- * 有条窗口的进程一览（按名字去重），控制台「状态」页拿它做候选。
- * @returns {Promise<Array<{name: string, pid: number, title: string}>>}
+ * Only apps with audio sessions. Same-name
+ * descendants map to their root so process-tree capture includes browser audio.
  */
 export async function listApps({ timeoutMs = 20000 } = {}) {
-  const rows = parseJson(await runPowerShell(LIST_SCRIPT, timeoutMs));
-  const apps = [];
+  const [snapshot] = parseJson(await runPowerShell(LIST_SCRIPT, timeoutMs));
+  if (!Array.isArray(snapshot?.processes)) throw new Error('应用列表返回了无效数据。');
+  return buildAppList(snapshot.processes, snapshot.audioError || '');
+}
+
+export function buildAppList(rows, audioError = '') {
+  if (audioError) throw new Error(`音频会话查询失败：${audioError}`);
+  const processes = new Map();
   for (const row of rows) {
     const name = typeof row?.name === 'string' ? row.name.trim() : '';
     const pid = Number(row?.pid);
     if (!name || !Number.isInteger(pid) || pid <= 0) continue;
-    apps.push({ name, pid, title: typeof row?.title === 'string' ? row.title : '' });
+    processes.set(pid, { name, pid, parent: Number(row.parent), title: typeof row?.title === 'string' ? row.title : '', audio: Boolean(row.audio) });
   }
-  apps.sort((a, b) => a.name.localeCompare(b.name, 'en'));
+  const roots = new Map();
+  for (const process of processes.values()) {
+    let root = process;
+    const visited = new Set([root.pid]);
+    while (true) {
+      const parent = processes.get(root.parent);
+      if (!parent || parent.name.toLowerCase() !== root.name.toLowerCase() || visited.has(parent.pid)) break;
+      visited.add(parent.pid);
+      root = parent;
+    }
+    const app = roots.get(root.pid) || { name: root.name, pid: root.pid, title: root.title, audio: false };
+    app.audio ||= process.audio;
+    if (!app.title && process.title) app.title = process.title;
+    roots.set(root.pid, app);
+  }
+  const apps = [...roots.values()].filter((app) => app.audio);
+  apps.sort((a, b) => Number(b.audio) - Number(a.audio) || Number(Boolean(b.title)) - Number(Boolean(a.title)) || a.name.localeCompare(b.name, 'en') || a.pid - b.pid);
   return apps;
 }
 

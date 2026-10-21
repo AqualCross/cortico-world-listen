@@ -29,36 +29,32 @@ const ENV_PROMPT = fileURLToPath(new URL('./ENV_PROMPT.md', import.meta.url));
 /** 全部工具的声明（不含 handler）；定义里的 describe 与 `tools()` 都取它。 */
 export const LISTEN_TOOL_DECLS = [
   {
-    name: 'listen',
+    name: 'listen_act',
     tags: ['act'],
     description: 'Turn the Hearing world on or off. "start" begins capturing system audio (or one application) and delivers speech chunks as events; "stop" ends it. Each chunk arrives as an event with a WAV attachment; hand its handle to stt_transcribe when you want the words.',
     parameters: {
       type: 'object',
       properties: {
         action: { type: 'string', enum: ['start', 'stop'], description: 'start = begin listening, stop = end it.' },
-        source: { type: 'string', enum: ['system', 'app'], description: 'Overrides the configured source: system audio or one application.' },
-        app: { type: 'string', description: 'When source=app: the process name (for example chrome.exe) or a PID. Defaults to the configured application.' },
-        minutes: { type: 'integer', description: 'Auto-stop after this many minutes; 0 uses the configured value.' },
+        source: { type: 'string', enum: ['system', 'app'], description: 'For start only: overrides the configured source, system audio or one application.' },
+        app: { type: 'string', description: 'For start with source=app: process name or PID string from listen_read action=source_list. Defaults to the configured application.' },
+        minutes: { type: 'integer', description: 'For start only: auto-stop after this many minutes; 0 uses the configured value.' },
       },
       required: ['action'],
     },
   },
   {
-    name: 'listen_recent',
+    name: 'listen_read',
     tags: ['read'],
-    description: 'List the most recently heard speech chunks: time, duration, source and the attachment handle. Hand a handle to stt_transcribe to get text.',
+    description: 'Read Hearing information without starting or stopping capture. source_list lists applications with Windows output audio sessions (including inactive sessions, not necessarily playing now), returning names, PIDs and window titles; use a PID string as app in listen_act action=start source=app. status reads listening state, target, counters, settings and last error. recent lists heard speech chunks and WAV attachment handles; hand a handle to stt_transcribe for text.',
     parameters: {
       type: 'object',
       properties: {
-        limit: { type: 'integer', description: 'How many chunks to list (1-50); default 10.' },
+        action: { type: 'string', enum: ['source_list', 'status', 'recent'], description: 'source_list = applications with audio sessions; status = hearing status; recent = recent speech chunks.' },
+        limit: { type: 'integer', description: 'For recent only: how many chunks to list (1-50); default 10.' },
       },
+      required: ['action'],
     },
-  },
-  {
-    name: 'listen_status',
-    tags: ['read'],
-    description: 'Hearing status: listening or not, the target, counters, segmentation settings and the last error.',
-    parameters: { type: 'object', properties: {} },
   },
 ];
 
@@ -242,15 +238,31 @@ export class ListenWorld {
   async #runTool(name, args, ctx) {
     try {
       switch (name) {
-        case 'listen': return await this.#toolListen(args);
-        case 'listen_recent': return this.#toolRecent(args);
-        case 'listen_status': return this.#toolStatus();
+        case 'listen_act': return await this.#toolListen(args);
+        case 'listen_read': {
+          switch (asText(args.action)) {
+            case 'source_list': return await this.#toolList();
+            case 'status': return this.#toolStatus();
+            case 'recent': return this.#toolRecent(args);
+            default: return { text: '[listen_read 没执行] action 要填 source_list、status 或 recent。', failed: true };
+          }
+        }
         default: return { text: `[${name} 没执行] 不认识这个工具。`, failed: true };
       }
     } catch (err) {
       this.#setError(msg(err));
       return { text: `[${name} 失败] ${msg(err)}`, failed: true };
     }
+  }
+
+  async #toolList() {
+    const apps = await this.#listApps();
+    if (!apps.length) return { text: '当前没有找到有音频会话的应用。尚未建立音频会话的软件不会列出；已知进程名或 PID 时仍可传给 listen_act。' };
+    return { text: [
+      '有音频会话的应用（含暂时未播放的会话，不代表当前正在发声）：',
+      ...apps.map(({ name, pid, title }) => JSON.stringify({ name, pid, title })),
+      '选择目标后调用 listen_act {"action":"start","source":"app","app":"<PID>"}，app 填上面的 PID 字符串。应用重启后请重新查询。',
+    ].join('\n') };
   }
 
   async #toolListen(args) {
@@ -262,14 +274,14 @@ export class ListenWorld {
       return { text: `听觉关了。这阵子听到 ${s.chunks} 块语音（${s.delivered} 块送达，${s.archived} 块只归档，${s.failedEvents} 块事件写入失败，${s.dropped} 个碎片被丢）。` };
     }
     if (action !== 'start') {
-      return { text: '[listen 没执行] action 要填 start 或 stop；不想听就别调用。', failed: true };
+      return { text: '[listen_act 没执行] action 要填 start 或 stop；不想听就别调用。', failed: true };
     }
     if (this.#str('control') === 'console') {
-      return { text: '[listen 没执行] 现在设置成只允许使用者从控制台打开听觉（worlds.listen.control = console）。请他到控制台「听觉 → 状态」里点「开始监听」；你可以用 listen_status 看状态。', failed: true };
+      return { text: '[listen_act 没执行] 现在设置成只允许使用者从控制台打开听觉（worlds.listen.control = console）。请他到控制台「听觉 → 状态」里点「开始监听」；你可以用 listen_read action=status 看状态。', failed: true };
     }
     const source = asText(args.source) || this.#source();
     if (source !== 'system' && source !== 'app') {
-      return { text: `[listen 没执行] source 只能是 system 或 app，给的是「${source}」。`, failed: true };
+      return { text: `[listen_act 没执行] source 只能是 system 或 app，给的是「${source}」。`, failed: true };
     }
     const app = asText(args.app) || this.#str('app');
     const minutes = Number(args.minutes);
@@ -281,11 +293,11 @@ export class ListenWorld {
       });
       const lines = [`听觉打开了：${this.#text().stateListening(s.target)}。`];
       lines.push('语音块会作为事件送来（每块带一段 WAV 附件）；需要文字时把附件的 log: 句柄交给 stt_transcribe，不必每块都转。');
-      if (s.wake === 'record') lines.push('当前是「只归档」：事件不唤醒你，用 listen_recent 取最近的块。');
+      if (s.wake === 'record') lines.push('当前是「只归档」：事件不唤醒你，用 listen_read action=recent 取最近的块。');
       if (s.autoStopAt) lines.push(`约 ${Math.round((new Date(s.autoStopAt).getTime() - this.#now()) / 60000)} 分钟后自动停止。`);
       return { text: lines.join('\n') };
     } catch (err) {
-      return { text: `[listen 失败] ${msg(err)}`, failed: true };
+      return { text: `[listen_act 失败] ${msg(err)}`, failed: true };
     }
   }
 
@@ -296,7 +308,7 @@ export class ListenWorld {
     lines.push(s.listening ? `听觉：${this.#text().stateListening(this.#targetLabel())}。` : '听觉：没在听。');
     const items = this.#chunksFor().list(limit);
     if (!items.length) {
-      lines.push('还没有听到语音块。要现在开始听，用 listen {"action":"start"}（若允许），或请使用者在控制台「听觉 → 状态」里打开。');
+      lines.push('还没有听到语音块。要现在开始听，用 listen_act {"action":"start"}（若允许），或请使用者在控制台「听觉 → 状态」里打开。');
       return { text: lines.join('\n') };
     }
     for (const item of items) {
@@ -364,7 +376,7 @@ export class ListenWorld {
     if (source === 'app') {
       const wanted = asText(opts.app) || this.#str('app');
       if (!wanted) {
-        throw new Error('按应用采集需要应用：进程名（如 chrome.exe）或 PID。可在控制台「听觉 → 状态」里从有声应用里挑。');
+        throw new Error('按应用采集需要应用：进程名（如 chrome.exe）或 PID。可在控制台「听觉 → 状态」里刷新应用列表并选择。');
       }
       const info = await this.#resolveApp(wanted);
       pid = info.pid;

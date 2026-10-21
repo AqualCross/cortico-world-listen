@@ -9,13 +9,16 @@
 
 ## 它做了什么
 
-装好并启用之后，桌宠会多出三个工具：
+「状态 → 应用 → 刷新应用列表」仅列出有 Windows 音频会话的应用（包括暂时未播放的会话），不会混入其他运行中的应用。音频会话不代表当前正在发声；查询失败时会明确报错。尚未建立音频会话的软件可以手动填写进程名或 PID 提前监听。选择项使用具体 PID，同名子进程合并到其根进程，不同独立实例分别保留；应用重启后需刷新重新选择。刷新列表不会覆盖手动填写或已选的目标。
+
+装好并启用之后，桌宠会多出两个工具：
 
 | 工具 | 标签 | 作用 |
 | --- | --- | --- |
-| `listen` | `act` | 打开/关掉听觉；可选 `source`（system / app）、`app`（进程名或 PID）、`minutes`（自动停止） |
-| `listen_recent` | `read` | 列出最近听到的语音块：时间、时长、来源、附件句柄 |
-| `listen_status` | `read` | 听觉状态：是否在听、目标、计数、切分参数、最近错误 |
+| `listen_act` | `act` | `action: start / stop`；启动时可选 `source`（system / app）、`app`（进程名或 PID 字符串）、`minutes`（自动停止） |
+| `listen_read` | `read` | `action: source_list / status / recent`；分别查询音频会话应用、监听状态、最近语音块；`limit` 仅用于 recent |
+
+先调用 `listen_read {"action":"source_list"}` 获取目标 PID，再调用 `listen_act {"action":"start","source":"app","app":"30064"}` 开始监听。查看语音块用 `listen_read {"action":"recent","limit":5}`，停止用 `listen_act {"action":"stop"}`。两个工具都必须传入 action；只读入口不会启动或停止采集。
 
 听着的每一块语音变成一个事件：
 
@@ -43,7 +46,7 @@ Core 会把附件落进 `data/media/` 并给出 `log:` 句柄，模型看到的�
 ### 两种送达方式（`worlds.listen.wake`）
 
 - `notify`（默认）：每块即时投递。事件总线本来就会按停顿合批（默认安静 2.5 秒后成批送达），所以一段连续的说话不会一块一轮地刷屏。
-- `record`：只落事件库、不唤醒。适合"先录着，等我要的时候再说"——桌宠用 `listen_recent` 取最近的块，或者到事件库里翻。
+- `record`：只落事件库、不唤醒。适合"先录着，等我要的时候再说"——桌宠用 `listen_read action=recent` 取最近的块，或者到事件库里翻。
 
 另外有 **每 60 秒送达上限**（`maxEventsPerMinute`）：超出的块照常落库，只是不投递——看视频、放音乐时对话不会被刷穿。
 
@@ -113,7 +116,7 @@ pnpm install      # 或 npm install；原生件都是预编译的，不需要编
 | `enabled` | `false` | 是否把 `listen_*` 挂给桌宠 |
 | `source` | `system` | `system` = 整个系统的输出（WASAPI 环回）；`app` = 某个应用 |
 | `app` | 空 | `source: app` 时用：进程名（如 `chrome.exe`）或 PID |
-| `control` | `console-and-agent` | 谁能开听：`console-and-agent` 或 `console`（只许使用者从控制台开；桌宠仍可停）。挂载不会自动开听，要用控制台按钮或桌宠调用 `listen` |
+| `control` | `console-and-agent` | 谁能开听：`console-and-agent` 或 `console`（只许使用者从控制台开；桌宠仍可停）。挂载不会自动开听，要用控制台按钮或桌宠调用 `listen_act` |
 | `wake` | `notify` | `notify` = 即时投递；`record` = 只归档不唤醒 |
 | `autoStopMinutes` | `15` | 打开后过多少分钟自动停；`0` = 不自动停 |
 | `vad` | `energy` | 切分方式：`energy`（能量门限，零依赖）或 `silero`（Silero VAD，需模型）；切换在下次开始监听时生效 |
@@ -229,8 +232,8 @@ cortico-world-listen/
 ## 启用之后
 
 - 让桌宠开听：`{"action":"start"}`（`control: console-and-agent` 时）；或者你到控制台「听觉 → 状态」点「开始监听」。
-- 听一段会议/视频后问它"刚才说了什么"：它会用 `listen_recent` 找到块，把句柄交给 `stt_transcribe`，再回答你。
-- 只想录不想被打扰：`wake: record`，事后用 `listen_recent`。
+- 听一段会议/视频后问它"刚才说了什么"：它会用 `listen_read action=recent` 找到块，把句柄交给 `stt_transcribe`，再回答你。
+- 只想录不想被打扰：`wake: record`，事后用 `listen_read action=recent`。
 
 ## 已知限制
 

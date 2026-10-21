@@ -1,7 +1,7 @@
 {
   "tools": [
     {
-      "name": "listen",
+      "name": "listen_act",
       "description": "Turn the Hearing world on or off. \"start\" begins capturing system audio (or one application) and delivers speech chunks as events; \"stop\" ends it. Each chunk arrives as an event with a WAV attachment; hand its handle to stt_transcribe when you want the words.",
       "parameters": {
         "type": "object",
@@ -20,15 +20,15 @@
               "system",
               "app"
             ],
-            "description": "Overrides the configured source: system audio or one application."
+            "description": "For start only: overrides the configured source, system audio or one application."
           },
           "app": {
             "type": "string",
-            "description": "When source=app: the process name (for example chrome.exe) or a PID. Defaults to the configured application."
+            "description": "For start with source=app: process name or PID string from listen_read action=source_list. Defaults to the configured application."
           },
           "minutes": {
             "type": "integer",
-            "description": "Auto-stop after this many minutes; 0 uses the configured value."
+            "description": "For start only: auto-stop after this many minutes; 0 uses the configured value."
           }
         },
         "required": [
@@ -44,38 +44,35 @@
       }
     },
     {
-      "name": "listen_recent",
-      "description": "List the most recently heard speech chunks: time, duration, source and the attachment handle. Hand a handle to stt_transcribe to get text.",
+      "name": "listen_read",
+      "description": "Read Hearing information without starting or stopping capture. source_list lists applications with Windows output audio sessions (including inactive sessions, not necessarily playing now), returning names, PIDs and window titles; use a PID string as app in listen_act action=start source=app. status reads listening state, target, counters, settings and last error. recent lists heard speech chunks and WAV attachment handles; hand a handle to stt_transcribe for text.",
       "parameters": {
         "type": "object",
         "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "source_list",
+              "status",
+              "recent"
+            ],
+            "description": "source_list = applications with audio sessions; status = hearing status; recent = recent speech chunks."
+          },
           "limit": {
             "type": "integer",
-            "description": "How many chunks to list (1-50); default 10."
+            "description": "For recent only: how many chunks to list (1-50); default 10."
           }
-        }
+        },
+        "required": [
+          "action"
+        ]
       },
       "tags": [
         "read"
       ],
       "summary": {
-        "zh": "看最近听到的语音块及其附件句柄。",
-        "en": "List the most recently heard speech chunks and their attachment handles."
-      }
-    },
-    {
-      "name": "listen_status",
-      "description": "Hearing status: listening or not, the target, counters, segmentation settings and the last error.",
-      "parameters": {
-        "type": "object",
-        "properties": {}
-      },
-      "tags": [
-        "read"
-      ],
-      "summary": {
-        "zh": "听觉的状态：是否在听、目标、计数与最近错误。",
-        "en": "Hearing status: listening, target, counters and the last error."
+        "zh": "查询听觉：音频会话应用列表、监听状态或最近语音块。",
+        "en": "Read Hearing information: applications with audio sessions, listening status or recent speech chunks."
       }
     }
   ],

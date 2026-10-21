@@ -10,17 +10,13 @@ import { LISTEN_TOOL_DECLS, ListenWorld } from './world.js';
 
 /** 自描述里每个工具配一句给人看的话，按工具名。 */
 const TOOL_SUMMARIES = {
-  listen: {
+  listen_act: {
     zh: '打开或关掉听觉：开始/停止监听系统声音或某个应用的音频。',
     en: 'Turn hearing on or off: start/stop listening to system audio or one application.',
   },
-  listen_recent: {
-    zh: '看最近听到的语音块及其附件句柄。',
-    en: 'List the most recently heard speech chunks and their attachment handles.',
-  },
-  listen_status: {
-    zh: '听觉的状态：是否在听、目标、计数与最近错误。',
-    en: 'Hearing status: listening, target, counters and the last error.',
+  listen_read: {
+    zh: '查询听觉：音频会话应用列表、监听状态或最近语音块。',
+    en: 'Read Hearing information: applications with audio sessions, listening status or recent speech chunks.',
   },
 };
 

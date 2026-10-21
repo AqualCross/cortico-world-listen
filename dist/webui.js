@@ -102,7 +102,9 @@ const ZH = {
   system: '系统声音',
   app: '应用',
   appField: '应用（进程名或 PID）',
-  appPick: '列出有声应用',
+  appPick: '刷新应用列表',
+  appChoose: '请选择应用',
+  appAudio: '有音频会话',
   appPicked: '已列出，选一个',
   appNone: '没有列出应用',
   start: '开始监听',
@@ -199,7 +201,9 @@ const EN = {
   system: 'System audio',
   app: 'Application',
   appField: 'Application (process name or PID)',
-  appPick: 'List windowed apps',
+  appPick: 'Refresh apps',
+  appChoose: 'Choose an application',
+  appAudio: 'Audio sessions',
   appPicked: 'Listed; pick one',
   appNone: 'No apps listed',
   start: 'Start listening',
@@ -617,32 +621,53 @@ function statusPanel(ctx) {
   };
 
   const pickApp = async () => {
+    if (pending || listening) return;
+    pending = true;
+    syncControls();
     const release = ctx.ui.busy(tx.busier, tx.appPick);
     try {
       const data = await ctx.invoke('apps', []);
       const apps = Array.isArray(data?.apps) ? data.apps : [];
+      const current = appInput.value.trim();
+      appSelect.replaceChildren();
+      appSelect.style.display = apps.length ? '' : 'none';
       if (!apps.length) {
         ctlNote.textContent = tx.appNone;
         return;
       }
-      appSelect.replaceChildren();
+      const placeholder = document.createElement('option');
+      placeholder.value = '';
+      placeholder.textContent = tx.appChoose;
+      appSelect.appendChild(placeholder);
+      const groups = new Map();
       for (const app of apps) {
+        const label = tx.appAudio;
+        if (!groups.has(label)) {
+          const group = document.createElement('optgroup');
+          group.label = label;
+          groups.set(label, group);
+          appSelect.appendChild(group);
+        }
         const opt = document.createElement('option');
-        opt.value = app.name;
-        opt.textContent = `${app.name} · ${app.title || app.pid}`;
-        appSelect.appendChild(opt);
+        opt.value = String(app.pid);
+        opt.textContent = `${app.name} · ${app.title || ''} (PID ${app.pid})`;
+        groups.get(label).appendChild(opt);
       }
-      appSelect.style.display = '';
-      appInput.value = apps[0].name;
+      appSelect.value = apps.some((app) => String(app.pid) === current) ? current : '';
       ctlNote.textContent = tx.appPicked;
     } catch (err) {
+      appSelect.replaceChildren();
+      appSelect.style.display = 'none';
       ctlNote.textContent = message(err);
       ctx.ui.toast(message(err), 'bad');
     } finally {
+      pending = false;
+      syncControls();
       release.dispose();
     }
   };
-  appSelect.addEventListener('change', () => { appInput.value = appSelect.value; });
+  appSelect.addEventListener('change', () => { if (appSelect.value) appInput.value = appSelect.value; });
+  appInput.addEventListener('input', () => { appSelect.value = appInput.value.trim(); });
 
   const start = async () => {
     const source = srcSegment.value;

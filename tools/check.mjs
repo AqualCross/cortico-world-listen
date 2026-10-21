@@ -278,7 +278,7 @@ try {
   });
 
   check('describe 与 describe.json 一致，实例工具都在声明里', () => {
-    assert(def.describe && Array.isArray(def.describe.tools) && def.describe.tools.length === 3, '定义缺 describe.tools');
+    assert(def.describe && Array.isArray(def.describe.tools) && def.describe.tools.length === 2, '定义缺 describe.tools');
     assert(Array.isArray(def.describe.events) && def.describe.events.length === 1, '定义缺 describe.events');
     const file = JSON.parse(readFileSync(join(pkgDir, 'describe.json'), 'utf8'));
     // 与框架的导出形状一致：只声明工具与事件。
@@ -411,6 +411,26 @@ try {
 
   // -------------------------------------------------------------------------
   console.log('按应用解析（纯函数）');
+
+  check('应用列表：音频子进程归根，保留后台与同名独立实例', () => {
+    const listed = apps.buildAppList([
+      { name: 'browser', pid: 10, parent: 1, title: 'Browser' },
+      { name: 'browser', pid: 20, parent: 10, audio: true },
+      { name: 'browser', pid: 30, parent: 1, title: 'Other instance', audio: true },
+      { name: 'music', pid: 40, parent: 1, audio: true },
+      { name: 'idle', pid: 50, parent: 1 },
+    ]);
+    eq(listed.length, 3, '只保留音频应用并合并同名进程树');
+    eq(listed[0].pid, 10, '窗口根进程承接音频标记');
+    eq(listed[0].audio, true, '子进程音频标记');
+    eq(listed.some((app) => app.pid === 40), true, '后台音频应用保留');
+    eq(listed.some((app) => app.pid === 30), true, '独立实例保留');
+    eq(listed.some((app) => app.pid === 50), false, '无音频会话应用不列出');
+    let failed = false;
+    try { apps.buildAppList([], 'unavailable'); } catch { failed = true; }
+    eq(failed, true, '查询失败报错而非列出所有进程');
+    eq(apps.buildAppList([{ name: '', pid: 0 }]).length, 0, '过滤无效进程');
+  });
 
   check('chooseRoot：优先没有同名父进程的根，再优先有窗口标题', () => {
     const rows = [
@@ -689,14 +709,16 @@ try {
     const rig = makeWorld();
     const world = rig.world;
     const tools = world.tools();
-    eq(tools.length, 3, '工具数量');
-    const listen = toolOf(world, 'listen');
-    const recent = toolOf(world, 'listen_recent');
-    const status = toolOf(world, 'listen_status');
+    eq(tools.length, 2, '工具数量');
+    assert(toolOf(world, 'listen_read').tags.includes('read'), 'list 是 read');
+    const listen = toolOf(world, 'listen_act');
+    const recent = toolOf(world, 'listen_read');
+    const status = toolOf(world, 'listen_read');
     assert(listen.tags.includes('act'), 'listen 是 act');
     assert(recent.tags.includes('read'), 'recent 是 read');
     assert(status.tags.includes('read'), 'status 是 read');
     eq(listen.parameters.required?.[0], 'action', 'listen required');
+    eq(recent.parameters.required?.[0], 'action', 'read required');
     const decl = world.webUi('zh');
     const ids = decl.panels.map((p) => p.id);
     assert(ids.includes('chunks') && ids.includes('status'), `面板缺：${ids.join(',')}`);
@@ -704,17 +726,47 @@ try {
     eq(decl.promptDocs[0].role, 'envPrompt', '保留模板编辑入口');
   });
 
+  await checkAsync('listen_read source_list：列出音频应用、空列表和查询失败，不启动采集', async () => {
+    const rig = makeWorld({ control: 'console' });
+    const result = await toolOf(rig.world, 'listen_read').handler({ action: 'source_list' }, {});
+    assert(result.text.includes('chrome') && result.text.includes('4242') && result.text.includes('example'), '包含进程名、PID、标题');
+    assert(result.text.includes('source') && result.text.includes('不代表当前正在发声'), '包含监听方法与会话含义');
+    assert(!result.failed, '只读查询不受 console 控制限制');
+    const status = await toolOf(rig.world, 'listen_read').handler({ action: 'status' }, {});
+    assert(status.text.includes('没在听'), '未开启监听');
+    const empty = makeWorld({}, { listApps: async () => [] });
+    const none = await toolOf(empty.world, 'listen_read').handler({ action: 'source_list' }, {});
+    assert(!none.failed && none.text.includes('没有找到'), '空列表是正常结果');
+    const broken = makeWorld({}, { listApps: async () => { throw new Error('session unavailable'); } });
+    const failure = await toolOf(broken.world, 'listen_read').handler({ action: 'source_list' }, {});
+    assert(failure.failed && failure.text.includes('session unavailable'), '异步查询失败被正确报告');
+  });
+
+  await checkAsync('读写工具：拒绝遗漏或越界 action', async () => {
+    const { world } = makeWorld();
+    for (const [name, args] of [
+      ['listen_read', {}], ['listen_read', { action: 'start' }],
+      ['listen_read', { action: 'stop' }], ['listen_read', { action: 'unknown' }],
+      ['listen_act', {}], ['listen_act', { action: 'source_list' }],
+    ]) {
+      const result = await toolOf(world, name).handler(args, {});
+      assert(result.failed && result.text.includes('action'), `${name} 拒绝 ${JSON.stringify(args)}`);
+    }
+    const status = await toolOf(world, 'listen_read').handler({ action: 'status' }, {});
+    assert(status.text.includes('没在听'), '非法操作不会开启采集');
+  });
+
   await checkAsync('开始听（系统）→ 喂一段话 → 事件带 WAV 附件与句柄', async () => {
     const rig = makeWorld();
     const { world } = rig;
     await world.start(rig.host);
-    const start = await toolOf(world, 'listen').handler({ action: 'start' }, {});
+    const start = await toolOf(world, 'listen_act').handler({ action: 'start' }, {});
     assert(!start.failed, `开始失败：${start.text}`);
     assert(start.text.includes('听觉打开了'), '开始回执');
     eq(rig.capture().target.source, 'system', '采集目标');
 
     await speakOnce(rig);
-    const stop = await toolOf(world, 'listen').handler({ action: 'stop' }, {});
+    const stop = await toolOf(world, 'listen_act').handler({ action: 'stop' }, {});
     assert(!stop.failed, `停止失败：${stop.text}`);
     assert(stop.text.includes('1 块'), `停止回执：${stop.text}`);
 
@@ -742,10 +794,10 @@ try {
     const list = await world.invoke('chunks', 'list', [10]);
     eq(list.count, 1, '最近列表条数');
     eq(list.items[0].handle, 'log:test1.wav', '句柄记进列表');
-    const recent = await toolOf(world, 'listen_recent').handler({ limit: 5 }, {});
+    const recent = await toolOf(world, 'listen_read').handler({ action: 'recent', limit: 5 }, {});
     assert(recent.text.includes('log:test1.wav'), 'listen_recent 给出句柄');
     assert(recent.text.includes('stt_transcribe'), '引导交给 STT');
-    const status = await toolOf(world, 'listen_status').handler({}, {});
+    const status = await toolOf(world, 'listen_read').handler({ action: 'status' }, {});
     assert(status.text.includes('计数：1 块'), `状态回执：${status.text}`);
     await world.stop();
     eq(rig.timers.size, 0, '停止后定时器清掉');
@@ -761,11 +813,11 @@ try {
     );
     const { world } = rig;
     await world.start(rig.host);
-    const start = await toolOf(world, 'listen').handler({ action: 'start' }, {});
+    const start = await toolOf(world, 'listen_act').handler({ action: 'start' }, {});
     assert(!start.failed, `开始失败：${start.text}`);
     eq(rig.capture().target.source, 'system', '采集目标');
     rig.feedFrames(-20, 12); // 第 5 帧时假 sherpa 排一段 400ms
-    const stop = await toolOf(world, 'listen').handler({ action: 'stop' }, {});
+    const stop = await toolOf(world, 'listen_act').handler({ action: 'stop' }, {});
     assert(!stop.failed, `停止失败：${stop.text}`);
     eq(rig.events.length, 2, `两个事件（400ms + 收尾 100ms）：${rig.events.length}`);
     const first = rig.events[0].e;
@@ -782,7 +834,7 @@ try {
     eq(st.model.source, 'config', '模型来源');
     const fetched = await world.invoke('status', 'fetchModel', []);
     eq(fetched.model.path, modelFile, 'fetchModel 在已有配置路径上直接返回');
-    const status = await toolOf(world, 'listen_status').handler({}, {});
+    const status = await toolOf(world, 'listen_read').handler({ action: 'status' }, {});
     assert(status.text.includes('切分：silero'), `状态回执：${status.text}`);
     await world.stop();
   });
@@ -831,9 +883,9 @@ try {
     const rig = makeWorld({ wake: 'record' });
     const { world } = rig;
     await world.start(rig.host);
-    await toolOf(world, 'listen').handler({ action: 'start' }, {});
+    await toolOf(world, 'listen_act').handler({ action: 'start' }, {});
     await speakOnce(rig);
-    await toolOf(world, 'listen').handler({ action: 'stop' }, {});
+    await toolOf(world, 'listen_act').handler({ action: 'stop' }, {});
     eq(rig.events.length, 1, '一个事件');
     eq(rig.events[0].o.deliver, false, '不唤醒');
     const list = await world.invoke('chunks', 'list', [10]);
@@ -846,10 +898,10 @@ try {
     const rig = makeWorld({ maxEventsPerMinute: 1 });
     const { world } = rig;
     await world.start(rig.host);
-    await toolOf(world, 'listen').handler({ action: 'start' }, {});
+    await toolOf(world, 'listen_act').handler({ action: 'start' }, {});
     await speakOnce(rig);
     await speakOnce(rig);
-    await toolOf(world, 'listen').handler({ action: 'stop' }, {});
+    await toolOf(world, 'listen_act').handler({ action: 'stop' }, {});
     eq(rig.events.length, 2, '两个事件');
     eq(rig.events[0].o.deliver, true, '第一块送达');
     eq(rig.events[1].o.deliver, false, '第二块被限速');
@@ -863,14 +915,14 @@ try {
     const rig = makeWorld({ control: 'console' });
     const { world } = rig;
     await world.start(rig.host);
-    const refused = await toolOf(world, 'listen').handler({ action: 'start' }, {});
+    const refused = await toolOf(world, 'listen_act').handler({ action: 'start' }, {});
     assert(refused.failed, '应当被拒');
     assert(refused.text.includes('只允许使用者从控制台'), `拒绝文案：${refused.text}`);
     // 控制台能开
     const s = await world.invoke('status', 'start', ['system', '']);
     eq(s.ok, true, '控制台开始');
     eq(s.state.listening, true, '在听');
-    const stopped = await toolOf(world, 'listen').handler({ action: 'stop' }, {});
+    const stopped = await toolOf(world, 'listen_act').handler({ action: 'stop' }, {});
     assert(!stopped.failed && stopped.text.includes('听觉关了'), '桌宠可以停');
     await world.stop();
   });
@@ -879,12 +931,12 @@ try {
     const rig = makeWorld({ source: 'app', app: 'chrome' });
     const { world } = rig;
     await world.start(rig.host);
-    const start = await toolOf(world, 'listen').handler({ action: 'start', source: 'app', app: 'chrome' }, {});
+    const start = await toolOf(world, 'listen_act').handler({ action: 'start', source: 'app', app: 'chrome' }, {});
     assert(!start.failed, `开始失败：${start.text}`);
     assert(start.text.includes('应用 chrome'), `目标文案：${start.text}`);
     eq(rig.capture().target.pid, 4242, 'PID 来自解析');
     await speakOnce(rig);
-    await toolOf(world, 'listen').handler({ action: 'stop' }, {});
+    await toolOf(world, 'listen_act').handler({ action: 'stop' }, {});
     eq(rig.events[0].e.senderKey, 'listen:app:chrome', 'senderKey 带应用');
     assert(rig.events[0].e.text.includes('应用 chrome'), '正文带应用');
     await world.stop();
@@ -894,7 +946,7 @@ try {
     const rig = makeWorld({ autoStopMinutes: 1 });
     const { world } = rig;
     await world.start(rig.host);
-    await toolOf(world, 'listen').handler({ action: 'start' }, {});
+    await toolOf(world, 'listen_act').handler({ action: 'start' }, {});
     eq(world.webUi('zh').badges[0].value, 'energy', '在听时显示实际模块');
     rig.clock.advance(61_000);
     rig.timers.run();
@@ -908,9 +960,9 @@ try {
     const rig = makeWorld();
     const { world } = rig;
     await world.start(rig.host);
-    await toolOf(world, 'listen').handler({ action: 'start' }, {});
+    await toolOf(world, 'listen_act').handler({ action: 'start' }, {});
     await speakOnce(rig);
-    await toolOf(world, 'listen').handler({ action: 'stop' }, {});
+    await toolOf(world, 'listen_act').handler({ action: 'stop' }, {});
     const list = await world.invoke('chunks', 'list', [10]);
     eq(list.count, 1, '一条记录');
     const item = list.items[0];
@@ -929,20 +981,20 @@ try {
     const dataDir = join(scratch, 'persist-data');
     const rig1 = makeWorld({}, { dataDir });
     await rig1.world.start(rig1.host);
-    await toolOf(rig1.world, 'listen').handler({ action: 'start' }, {});
+    await toolOf(rig1.world, 'listen_act').handler({ action: 'start' }, {});
     await speakOnce(rig1);
-    await toolOf(rig1.world, 'listen').handler({ action: 'stop' }, {});
+    await toolOf(rig1.world, 'listen_act').handler({ action: 'stop' }, {});
     eq(rig1.events.length, 1, '第一程一块');
     await rig1.world.stop();
 
     // 新的世界实例（模拟重启应用）
     const rig2 = makeWorld({}, { dataDir });
     await rig2.world.start(rig2.host);
-    const recent = await toolOf(rig2.world, 'listen_recent').handler({ limit: 5 }, {});
+    const recent = await toolOf(rig2.world, 'listen_read').handler({ action: 'recent', limit: 5 }, {});
     assert(recent.text.includes('#1'), `旧块还在：${recent.text}`);
-    await toolOf(rig2.world, 'listen').handler({ action: 'start' }, {});
+    await toolOf(rig2.world, 'listen_act').handler({ action: 'start' }, {});
     await speakOnce(rig2);
-    await toolOf(rig2.world, 'listen').handler({ action: 'stop' }, {});
+    await toolOf(rig2.world, 'listen_act').handler({ action: 'stop' }, {});
     const list = await rig2.world.invoke('chunks', 'list', [10]);
     eq(list.count, 2, '两程共两条');
     eq(list.items[0].seq, 2, '编号接着数');
