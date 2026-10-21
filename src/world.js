@@ -10,7 +10,7 @@
  */
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, statSync } from 'node:fs';
+import { mkdirSync, readFileSync, statSync } from 'node:fs';
 import { isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -18,14 +18,12 @@ import { listApps as listAppsDefault, resolveApp as resolveAppDefault } from './
 import { Capturer, captureModuleStatus } from './capture.js';
 import { Chunks } from './chunks.js';
 import { DEFAULTS, EVENT_TYPE, FRAME_MS, ID, SAMPLE_RATE, configGroup, text } from './config.js';
-import { SileroSegmenter, ensureSileroModel, modelState } from './silero.js';
+import { SileroSegmenter, ensureSileroModel, ensureSileroRuntime, modelState } from './silero.js';
 import { Segmenter } from './vad.js';
 import { encodeWav, formatKb, formatSeconds } from './wav.js';
 
 const msg = (err) => (err instanceof Error ? err.message : String(err));
 const asText = (value) => (typeof value === 'string' ? value.trim() : '');
-
-/** 环境提示词模板：按本模块位置解析，不依赖宿主递来的 packageDir（那是 bot 的代码包目录）。 */
 const ENV_PROMPT = fileURLToPath(new URL('./ENV_PROMPT.md', import.meta.url));
 
 /** 全部工具的声明（不含 handler）；定义里的 describe 与 `tools()` 都取它。 */
@@ -75,7 +73,6 @@ export class ListenWorld {
   #timer = null;
   #shipChain = Promise.resolve();
   #autoStopAt = 0;
-  #baseAt = 0;
   #emitTimes = [];
   #lastLevelAt = 0;
   #state = {
@@ -90,6 +87,7 @@ export class ListenWorld {
     chunks: 0,
     delivered: 0,
     archived: 0,
+    failedEvents: 0,
     dropped: 0,
     throttled: 0,
     lastChunkAt: '',
@@ -230,26 +228,12 @@ export class ListenWorld {
   }
 
   // -------------------------------------------------------------------------
-  // 提示词
-  // -------------------------------------------------------------------------
-
-  /**
-   * 只在听着的时候给一段环境提示词；关着返回 null，World 的段就不进前缀。
-   * 变量只随「开/关、目标、送达方式」变化——不把计数放进来，免得每次投递
-   * 都打穿前缀缓存。
-   */
-  envPromptVars() {
-    if (!this.#state.listening) return null;
-    return {
-      'listen.state': '开着',
-      'listen.target': this.#targetLabel(),
-      'listen.mode': this.#str('wake') === 'record' ? '只归档（用 listen_recent 取）' : '即时送达（说完即投）',
-    };
-  }
-
-  // -------------------------------------------------------------------------
   // 工具
   // -------------------------------------------------------------------------
+
+  envPromptVars() {
+    return {};
+  }
 
   tools() {
     return LISTEN_TOOL_DECLS.map((decl) => ({ ...decl, handler: (args, ctx) => this.#runTool(decl.name, args ?? {}, ctx) }));
@@ -275,7 +259,7 @@ export class ListenWorld {
       if (!this.#state.listening) return { text: '听觉已经关着。' };
       const s = this.#state;
       await this.#stopListening('tool');
-      return { text: `听觉关了。这阵子听到 ${s.chunks} 块语音（${s.delivered} 块送达，${s.archived} 块只归档，${s.dropped} 个碎片被丢）。` };
+      return { text: `听觉关了。这阵子听到 ${s.chunks} 块语音（${s.delivered} 块送达，${s.archived} 块只归档，${s.failedEvents} 块事件写入失败，${s.dropped} 个碎片被丢）。` };
     }
     if (action !== 'start') {
       return { text: '[listen 没执行] action 要填 start 或 stop；不想听就别调用。', failed: true };
@@ -324,7 +308,8 @@ export class ListenWorld {
         item.handle || '（附件已不在）',
       ];
       if (item.forced) bits.push('被强切');
-      if (!item.delivered) bits.push('只归档');
+      if (item.deliveryError) bits.push(`事件写入失败：${item.deliveryError}`);
+      else if (!item.delivered) bits.push('只归档');
       lines.push(bits.join(' · '));
     }
     lines.push('想要文字：把上面的 log: 句柄交给 stt_transcribe，例如 {"audio":"log:…wav"}。');
@@ -336,7 +321,7 @@ export class ListenWorld {
     const lines = [];
     lines.push(s.listening ? `听觉：${this.#text().stateListening(s.target)}（${s.wake === 'record' ? '只归档' : '即时送达'}）。` : '听觉：没在听。');
     if (s.listening) lines.push(`开始于：${s.startedAt}${s.autoStopAt ? ` · 自动停止：${s.autoStopAt}` : ''}`);
-    lines.push(`计数：${s.chunks} 块语音（送达 ${s.delivered}，归档 ${s.archived}，限速压掉 ${s.throttled}，碎片 ${s.dropped}）· 收帧 ${s.frames}（${formatSeconds(s.audioMs / 1000)}）。`);
+    lines.push(`计数：${s.chunks} 块语音（送达 ${s.delivered}，归档 ${s.archived}，事件失败 ${s.failedEvents}，限速压掉 ${s.throttled}，碎片 ${s.dropped}）· 收帧 ${s.frames}（${formatSeconds(s.audioMs / 1000)}）。`);
     lines.push(`记录：${s.store.count} 块（${formatKb(s.store.totalBytes)}，重启也在；目录 ${s.store.dir}）。`);
     if (s.vad.kind === 'silero') {
       lines.push(`切分：silero（概率门限 ${s.vad.sileroThreshold}）· 起说 ${s.vad.minSpeechMs}ms · 收尾 ${s.vad.silenceMs}ms · 单块上限 ${s.vad.maxUtteranceMs}ms。`);
@@ -393,6 +378,7 @@ export class ListenWorld {
     const kind = this.#vadKindSetting();
     let segmenter;
     if (kind === 'silero') {
+      const runtime = await ensureSileroRuntime({ dataDir: this.dataDir, load: this.#sileroLoad });
       // 模型可能在缓存里、也可能要下载一次；拿不到就带着方向报错（不静默退能量）。
       const model = await ensureSileroModel({
         cfgPath: this.#str('sileroModel'),
@@ -407,7 +393,7 @@ export class ListenWorld {
         modelPath: model.path,
         sampleRate: SAMPLE_RATE,
         frameMs: FRAME_MS,
-        loadSherpa: this.#sileroLoad,
+        loadSherpa: () => runtime,
         now: this.#now,
         log: this.#host?.log,
         ...this.#sileroConfig(),
@@ -439,7 +425,6 @@ export class ListenWorld {
     const minutes = opts.minutes ?? minutesCfg;
     this.#capture = capture;
     this.#segmenter = segmenter;
-    this.#baseAt = startedAtMs;
     this.#autoStopAt = minutes > 0 ? startedAtMs + minutes * 60_000 : 0;
     this.#emitTimes = [];
     this.#state = {
@@ -454,6 +439,7 @@ export class ListenWorld {
       chunks: 0,
       delivered: 0,
       archived: 0,
+      failedEvents: 0,
       dropped: 0,
       throttled: 0,
       lastChunkAt: '',
@@ -558,7 +544,6 @@ export class ListenWorld {
     const wake = this.#str('wake') === 'record' ? 'record' : 'notify';
     const throttled = wake === 'notify' && this.#rateBlocked(now);
     const deliver = wake === 'notify' && !throttled;
-    if (deliver) this.#emitTimes.push(now);
 
     const bytes = encodeWav(u.pcm, SAMPLE_RATE);
     const seconds = u.durationMs / 1000;
@@ -567,13 +552,17 @@ export class ListenWorld {
       : this.#text().targetSystem;
     const forced = u.forced ? ' · 说得太长被切开' : '';
     const body = `听到一段语音：${seconds.toFixed(1)} 秒（${targetLabel}${forced}）`;
-    const startedAt = new Date(this.#baseAt + u.startAt).toISOString();
+    // Both segmenters return an absolute wall-clock timestamp.
+    const startedAt = new Date(u.startAt).toISOString();
     const stamp = new Date(now).toISOString().replace(/[-:]/g, '').replace('T', '-').slice(0, 15);
     const at = new Date(now).toISOString();
 
     let handle = '';
+    let eventSaved = false;
+    let deliveryError = '';
     try {
-      const envelope = await this.#host?.pushEvent?.({
+      if (!this.#host?.pushEvent) throw new Error('事件宿主不可用');
+      const envelope = await this.#host.pushEvent({
         type: EVENT_TYPE,
         source: this.id,
         senderKey: this.#senderKey(),
@@ -597,8 +586,11 @@ export class ListenWorld {
         }],
       }, { deliver, trigger: 'debounce' });
       handle = envelope?.blobs?.[0]?.handle ?? '';
+      eventSaved = true;
+      if (deliver) this.#emitTimes.push(now);
     } catch (err) {
-      this.#setError(`事件没送出去：${msg(err)}`);
+      deliveryError = msg(err);
+      this.#setError(`事件没送出去：${deliveryError}`);
     }
 
     // 记录进仓库：每块一个 WAV 文件 + 索引；写不进去只记错，不挡采集。
@@ -616,14 +608,16 @@ export class ListenWorld {
         handle,
         forced: u.forced,
         peakDb: Math.round(u.peakDb * 10) / 10,
-        delivered: deliver,
+        delivered: deliver && eventSaved,
+        deliveryError,
       });
     } catch (err) {
       this.#setError(`记进仓库失败：${msg(err)}`);
     }
 
     this.#state.chunks += 1;
-    if (deliver) this.#state.delivered += 1;
+    if (!eventSaved) this.#state.failedEvents += 1;
+    else if (deliver) this.#state.delivered += 1;
     else this.#state.archived += 1;
     if (throttled) this.#state.throttled += 1;
     this.#state.lastChunkAt = at;
@@ -673,6 +667,7 @@ export class ListenWorld {
       chunks: s.chunks,
       delivered: s.delivered,
       archived: s.archived,
+      failedEvents: s.failedEvents,
       dropped: s.dropped,
       throttled: s.throttled,
       lastChunkAt: s.lastChunkAt,
@@ -689,7 +684,7 @@ export class ListenWorld {
         totalDurationMs: this.#chunksFor().totalDurationMs,
       },
       vad: {
-        kind: this.#vadKind || this.#vadKindSetting(),
+        kind: this.#state.listening ? this.#vadKind : this.#vadKindSetting(),
         ...this.#vadConfig(),
         sileroThreshold: this.#num('sileroThreshold', 0.1, 0.9),
       },
@@ -713,7 +708,7 @@ export class ListenWorld {
         hint: s.listening ? t.stateListening(s.target) : (ok ? t.stateIdle : t.stateError(s.module.error)),
       }],
       badges: [
-        { label: t.badgeState, value: s.listening ? t.on : t.off, tone: s.listening ? 'on' : 'off' },
+        { label: t.badgeState, value: s.listening ? s.vad.kind : t.off, tone: s.listening ? 'on' : 'off' },
         { label: t.badgeChunks, value: String(s.store.count), tone: s.store.count ? 'on' : 'off' },
         { label: t.badgeTarget, value: s.listening ? s.target : '—', tone: s.listening ? 'on' : 'off' },
       ],
@@ -725,14 +720,9 @@ export class ListenWorld {
       promptDocs: [{
         key: `worlds.${ID}.env`,
         title: t.label,
-        description: '听觉的环境段：现在是否在听、语音块事件形状与转写接力（只在听着时出现）。',
         path: ENV_PROMPT,
         role: 'envPrompt',
-        vars: [
-          { name: 'listen.state', description: '听觉的开/关（关着时整段不出现）' },
-          { name: 'listen.target', description: '正在听的目标：系统声音或某个应用' },
-          { name: 'listen.mode', description: '语音块的送达方式：即时送达 / 只归档' },
-        ],
+        vars: [],
       }],
       invoke: (panel, method, args) => this.invoke(panel, method, args),
       stream: (panel, socket) => this.stream(panel, socket),
@@ -761,6 +751,18 @@ export class ListenWorld {
         }
         case 'apps': return { apps: await this.#listApps() };
         case 'model': return { model: this.#modelState() };
+        case 'prepareModule': {
+          if (list[0] !== 'silero' && list[0] !== 'energy') throw new Error('未知听觉模块');
+          if (this.#state.listening) throw new Error('请先停止监听再切换听觉模块。');
+          if (list[0] === 'silero') {
+            const onProgress = (stage) => this.#broadcast({ t: 'module-progress', stage });
+            await ensureSileroRuntime({ dataDir: this.dataDir, load: this.#sileroLoad, onProgress });
+            await ensureSileroModel({ cfgPath: this.#str('sileroModel'), dataDir: this.dataDir,
+              packageDir: this.packageDir, botDir: this.botDir, fetchImpl: this.#fetch, log: this.#host?.log, onProgress });
+            onProgress('ready');
+          }
+          return { ok: true };
+        }
         case 'fetchModel': {
           const model = await ensureSileroModel({
             cfgPath: this.#str('sileroModel'),
@@ -891,9 +893,6 @@ export class ListenWorld {
       dir: this.dir(),
       records: this.#chunksFor().count,
     });
-    if (this.#bool('autoListen')) {
-      this.#startListening({}).catch((err) => this.#setError(msg(err)));
-    }
   }
 
   async stop() {

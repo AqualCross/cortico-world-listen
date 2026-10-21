@@ -94,7 +94,7 @@
       "key": "worlds.listen.env",
       "title": "听觉",
       "role": "envPrompt",
-      "content": "### 听觉\n\n现在在听：**{{listen.target}}**（{{listen.mode}}）。声音被自动切成一块块语音，每块以 `listen.chunk` 事件出现：正文是一行说明（时长、来源），后面跟着一行 `[blob log:….wav audio/wav …]`——那是这一块的音频附件。\n\n- **要文字时**：把附件的 `log:` 句柄交给 `stt_transcribe`（例如 `{\"audio\":\"log:xxxx.wav\"}`），转写结果会在回执里。\n- **挑着转**：只转你判断重要的块，不要每一块都转；不转的块留着就行（事件库里还在）。\n- **别把自己听进去**：{{listen.target}} 里可能包含你自己正在说的话或放出的声音（尤其系统声音）；那是你自己的，不是对方说的。\n- 手里的工具：`listen_recent` 看最近听到的块；`listen` 开关听觉（开之前先确认使用者确实想让你听）；`listen_status` 看状态。\n"
+      "content": ""
     }
   ]
 }

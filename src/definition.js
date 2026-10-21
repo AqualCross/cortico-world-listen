@@ -55,7 +55,7 @@ export const listenDefinition = {
     dataDir: ctx.dataDir,
     botDir: ctx.botDir,
     // 本扩展包自己的根目录。宿主递来的 ctx.packageDir 是 bot 的代码包目录，
-    // 不是本扩展的；拼自己的文件（环境提示词模板、包内 Silero 资产）要以本文件为准。
+    // 不是本扩展的；拼自己的文件（包内 Silero 资产）要以本文件为准。
     packageDir: fileURLToPath(new URL('..', import.meta.url)),
   }),
   /** 自描述：可能出现的全部工具与事件，不进提示词。`describe:extension` 把它导出成 describe.json。 */

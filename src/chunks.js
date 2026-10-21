@@ -124,6 +124,7 @@ export class Chunks {
       forced: Boolean(entry.forced),
       peakDb: numOf(entry.peakDb),
       delivered: entry.delivered !== false,
+      deliveryError: String(entry.deliveryError ?? ''),
     };
     this.#nextSeq = item.seq + 1;
     this.#items.unshift(item);
@@ -231,6 +232,7 @@ export class Chunks {
         forced: Boolean(entry.forced),
         peakDb: numOf(entry.peakDb),
         delivered: entry.delivered !== false,
+        deliveryError: String(entry.deliveryError ?? ''),
       });
       if (seq > maxSeq) maxSeq = seq;
     }

@@ -281,19 +281,14 @@ try {
     assert(def.describe && Array.isArray(def.describe.tools) && def.describe.tools.length === 3, '定义缺 describe.tools');
     assert(Array.isArray(def.describe.events) && def.describe.events.length === 1, '定义缺 describe.events');
     const file = JSON.parse(readFileSync(join(pkgDir, 'describe.json'), 'utf8'));
-    // 与框架的导出形状一致：工具 + 事件 + 环境提示词模板原文。
+    // 与框架的导出形状一致：只声明工具与事件。
     const world = mod.listenDefinition.create({ cfg: def.defaults(), dataDir: scratch, botDir: scratch, packageDir: pkgDir });
-    const docs = (world.webUi('zh').promptDocs ?? []).filter((doc) => doc.role === 'envPrompt' && existsSync(doc.path));
-    const prompts = docs.map((doc) => ({
-      key: doc.key,
-      title: doc.title,
-      ...(doc.role ? { role: doc.role } : {}),
-      content: readFileSync(doc.path, 'utf8'),
-    }));
     const expected = JSON.parse(JSON.stringify({
       tools: def.describe.tools,
       events: def.describe.events,
-      ...(prompts.length ? { prompts } : {}),
+      prompts: world.webUi('zh').promptDocs.map((doc) => ({
+        key: doc.key, title: doc.title, role: doc.role, content: readFileSync(doc.path, 'utf8'),
+      })),
     }));
     eq(stable(file), stable(expected), 'describe.json 与代码里的 describe 不一致');
     eq(file.events[0].type, 'listen.chunk', 'describe 事件名');
@@ -544,6 +539,24 @@ try {
     eq(seg.kind, 'silero', 'kind');
   });
 
+  check('Silero 时间映射：启动后长静音、两段间静音和延迟输出', () => {
+    const fake = makeFakeSherpa();
+    const seg = new silero.SileroSegmenter({ modelPath: 'x', loadSherpa: () => fake.module,
+      now: () => 1000, ...SILERO_OPTS });
+    fake.state.last.scripted = true;
+    seg.push(frame(-20), 61020);
+    seg.push(frame(-20), 61040);
+    fake.state.last.queue.push({ start: 0, samples: new Float32Array(6400) });
+    const first = seg.push(frame(-20), 61060);
+    eq(first[0].startAt, 61000, '首次语音不使用启动时间');
+    seg.push(frame(-20), 121020);
+    fake.state.last.queue.push({ start: 320, samples: new Float32Array(6400) });
+    fake.state.last.queue.push({ start: 960, samples: new Float32Array(6400) });
+    const later = seg.push(frame(-20), 121040);
+    eq(later[0].startAt, 61020, '延迟输出的旧片段保留原时间映射');
+    eq(later[1].startAt, 121000, '第二段不因一分钟静音而偏早');
+  });
+
   check('太短的段丢掉，计进 dropped', () => {
     const fake = makeFakeSherpa();
     const seg = new silero.SileroSegmenter({
@@ -663,17 +676,13 @@ try {
     eq(world.packageDir.replace(/[\\/]+$/, ''), pkgDir.replace(/[\\/]+$/, ''), 'packageDir 应解析到本扩展根目录');
   });
 
-  check('环境提示词模板路径不随宿主 packageDir 跑偏', () => {
-    const world = new ListenWorld({
-      cfg: def.defaults(),
-      dataDir: join(scratch, 'envp'),
-      botDir: join(scratch, 'bot'),
-      packageDir: join(scratch, 'bot'),
-    });
-    const doc = (world.webUi('zh').promptDocs ?? []).find((d) => d.role === 'envPrompt');
-    assert(doc, '缺环境提示词声明');
-    assert(existsSync(doc.path), `模板找不到：${doc.path}`);
-    assert(doc.path.replace(/\\/g, '/').startsWith(pkgDir.replace(/\\/g, '/')), `模板不在本扩展目录下：${doc.path}`);
+  check('环境模板默认空白，可编辑且不注入动态状态', () => {
+    const world = def.create({ cfg: def.defaults(), dataDir: scratch, botDir: scratch });
+    const doc = world.webUi('zh').promptDocs[0];
+    eq(readFileSync(doc.path, 'utf8'), '', '默认模板完全为空');
+    eq(doc.description, undefined, '不显示板块描述');
+    eq(stable(world.envPromptVars()), '{}', '无动态状态变量');
+    eq(JSON.parse(readFileSync(join(pkgDir, 'describe.json'), 'utf8')).prompts[0].content, '', '本地声明使用空模板');
   });
 
   await checkAsync('工具形状与声明', async () => {
@@ -692,10 +701,7 @@ try {
     const ids = decl.panels.map((p) => p.id);
     assert(ids.includes('chunks') && ids.includes('status'), `面板缺：${ids.join(',')}`);
     assert(decl.config?.length === 1, '缺配置组');
-    const doc = decl.promptDocs?.[0];
-    eq(doc?.role, 'envPrompt', '提示词文档 role');
-    assert(existsSync(doc.path), '环境提示词模板不在');
-    eq(world.envPromptVars(), null, '没在听时不进前缀');
+    eq(decl.promptDocs[0].role, 'envPrompt', '保留模板编辑入口');
   });
 
   await checkAsync('开始听（系统）→ 喂一段话 → 事件带 WAV 附件与句柄', async () => {
@@ -706,7 +712,6 @@ try {
     assert(!start.failed, `开始失败：${start.text}`);
     assert(start.text.includes('听觉打开了'), '开始回执');
     eq(rig.capture().target.source, 'system', '采集目标');
-    eq(world.envPromptVars()?.['listen.target'], '系统声音', '前缀变量');
 
     await speakOnce(rig);
     const stop = await toolOf(world, 'listen').handler({ action: 'stop' }, {});
@@ -725,6 +730,7 @@ try {
     // 16 静 + 12 响：开口在第 26 帧，保留 16 帧 preRoll + 2 响 + 30 静 = 48 帧。
     eq(e.meta.durationMs, 48 * 20, `meta 时长：${e.meta.durationMs}`);
     eq(e.meta.source, 'system', 'meta source');
+    assert(Math.abs(new Date(e.meta.startedAt).getTime() - rig.clock.now()) < 2000, 'energy 起点在实际采集时间附近，不重复累加启动时间');
     const bytes = Buffer.from(e.blobs[0].bytes);
     const info = wav.wavInfo(bytes);
     assert(info && Math.abs(info.seconds - e.meta.durationMs / 1000) < 0.001, '附件是能读的 WAV');
@@ -758,7 +764,6 @@ try {
     const start = await toolOf(world, 'listen').handler({ action: 'start' }, {});
     assert(!start.failed, `开始失败：${start.text}`);
     eq(rig.capture().target.source, 'system', '采集目标');
-    eq(world.envPromptVars()?.['listen.target'], '系统声音', '前缀变量');
     rig.feedFrames(-20, 12); // 第 5 帧时假 sherpa 排一段 400ms
     const stop = await toolOf(world, 'listen').handler({ action: 'stop' }, {});
     assert(!stop.failed, `停止失败：${stop.text}`);
@@ -766,6 +771,7 @@ try {
     const first = rig.events[0].e;
     eq(first.type, 'listen.chunk', '事件类型');
     eq(first.meta.source, 'system', 'meta source');
+    assert(Math.abs(new Date(first.meta.startedAt).getTime() - rig.clock.now()) < 2000, 'silero 起点在实际采集时间附近，不重复累加启动时间');
     const firstInfo = wav.wavInfo(Buffer.from(first.blobs[0].bytes));
     assert(Math.abs(firstInfo.seconds - 0.4) < 0.001, `第一块 0.4s：${firstInfo.seconds}`);
     assert(Math.abs(first.meta.durationMs - 400) < 1, `meta 时长：${first.meta.durationMs}`);
@@ -779,6 +785,46 @@ try {
     const status = await toolOf(world, 'listen_status').handler({}, {});
     assert(status.text.includes('切分：silero'), `状态回执：${status.text}`);
     await world.stop();
+  });
+
+  await checkAsync('事件失败：保留音频与错误，不误报送达且不占成功额度', async () => {
+    const rig = makeWorld({ maxEventsPerMinute: 1 });
+    const push = rig.host.pushEvent;
+    rig.host.pushEvent = async () => { throw new Error('store unavailable'); };
+    await rig.world.start(rig.host);
+    await rig.world.invoke('status', 'start', ['system']);
+    await speakOnce(rig);
+    await flush();
+    const failed = await rig.world.invoke('chunks', 'list', [10]);
+    eq(failed.state.delivered, 0, '失败不算送达');
+    eq(failed.state.archived, 0, '失败不算成功归档');
+    eq(failed.state.failedEvents, 1, '失败独立计数');
+    eq(failed.items[0].delivered, false, '本地标记未送达');
+    eq(failed.items[0].deliveryError, 'store unavailable', '错误保存到本地记录');
+    assert(existsSync(failed.items[0].path), '失败后仍保留本地音频');
+    const loaded = new chunksMod.Chunks({ dir: failed.dir ?? failed.state.store.dir, keep: 200 });
+    eq(loaded.list(1)[0].deliveryError, 'store unavailable', '重新加载后保留失败原因');
+    rig.host.pushEvent = push;
+    await speakOnce(rig);
+    await flush();
+    eq(rig.events[0].o.deliver, true, '失败未占每分钟成功投递额度');
+    const state = await rig.world.invoke('status', 'state');
+    eq(state.delivered, 1, '恢复后计入成功投递');
+    eq(state.failedEvents, 1, '保留失败计数');
+    await rig.world.stop();
+  });
+
+  await checkAsync('只归档模式失败：不计入已归档', async () => {
+    const rig = makeWorld({ wake: 'record' });
+    rig.host.pushEvent = async () => { throw new Error('disk full'); };
+    await rig.world.start(rig.host);
+    await rig.world.invoke('status', 'start', ['system']);
+    await speakOnce(rig);
+    await flush();
+    const state = await rig.world.invoke('status', 'state');
+    eq(state.archived, 0, '归档失败不计入成功');
+    eq(state.failedEvents, 1, '计入事件失败');
+    await rig.world.stop();
   });
 
   await checkAsync('只归档模式：事件落库不唤醒', async () => {
@@ -849,7 +895,7 @@ try {
     const { world } = rig;
     await world.start(rig.host);
     await toolOf(world, 'listen').handler({ action: 'start' }, {});
-    eq(world.webUi('zh').badges[0].value, '听着', '在听');
+    eq(world.webUi('zh').badges[0].value, 'energy', '在听时显示实际模块');
     rig.clock.advance(61_000);
     rig.timers.run();
     await flush();
@@ -920,14 +966,48 @@ try {
     await world.stop();
   });
 
-  await checkAsync('autoListen：挂载就开听', async () => {
-    const rig = makeWorld({ autoListen: true });
-    const { world } = rig;
-    await world.start(rig.host);
-    await flush();
-    const s = await world.invoke('status', 'state', []);
-    eq(s.listening, true, '挂载后应当听着');
-    await world.stop();
+  await checkAsync('听觉模块：Silero 自动准备模型，缓存复用，监听中禁止切换', async () => {
+    const fake = makeFakeSherpa();
+    let downloads = 0;
+    const rig = makeWorld({}, { silero: {
+      loadSherpa: () => fake.module,
+      fetchImpl: async () => { downloads++; return new Response(Buffer.alloc(200000)); },
+    } });
+    await rig.world.start(rig.host);
+    await rig.world.invoke('status', 'prepareModule', ['energy']);
+    eq(downloads, 0, '能量门限无需下载');
+    const stages = [];
+    rig.world.stream('status', { open: true, send: (raw) => {
+      const frame = JSON.parse(raw);
+      if (frame.t === 'module-progress') stages.push(frame.stage);
+    }, onClose() {}, onMessage() {} });
+    await rig.world.invoke('status', 'prepareModule', ['silero']);
+    eq(stages.join(','), 'checking-runtime,checking-model,downloading-model,saving-model,ready', '下载期间按实际步骤推送状态');
+    stages.length = 0;
+    await rig.world.invoke('status', 'prepareModule', ['silero']);
+    eq(stages.join(','), 'checking-runtime,checking-model,ready', '缓存命中不显示下载或安装');
+    eq(downloads, 1, '仅缺少模型时下载一次');
+    eq((await rig.world.invoke('status', 'state')).vad.kind, 'energy', '准备不擅自修改配置');
+    rig.world.cfg.vad = 'silero'; // 模拟 ctx.setConfig 保存后的配置
+    eq((await rig.world.invoke('status', 'state')).vad.kind, 'silero', '空闲状态跟随配置页');
+    await rig.world.invoke('status', 'start', ['system']);
+    let blocked = false;
+    try { await rig.world.invoke('status', 'prepareModule', ['energy']); } catch { blocked = true; }
+    assert(blocked, '监听中禁止切换');
+    await rig.world.stop();
+  });
+
+  await checkAsync('听觉模块：模型下载失败不修改原选择', async () => {
+    const fake = makeFakeSherpa();
+    const rig = makeWorld({}, { silero: {
+      loadSherpa: () => fake.module,
+      fetchImpl: async () => { throw new Error('offline'); },
+    } });
+    let error;
+    try { await rig.world.invoke('status', 'prepareModule', ['silero']); } catch (err) { error = err; }
+    assert(error?.message.includes('offline'), '返回下载错误');
+    eq(rig.world.cfg.vad, 'energy', '保留原配置');
+    await rig.world.stop();
   });
 
   // -------------------------------------------------------------------------

@@ -53,7 +53,7 @@ function concat(frames) {
 /**
  * @typedef {object} Utterance
  * @property {Int16Array} pcm 单声道 PCM16
- * @property {number} startAt 采集开始以来的毫秒数（第一帧的起点）
+ * @property {number} startAt 第一帧的墙上时钟时间戳（毫秒，与 push 的 atMs 同基准）
  * @property {number} durationMs 实际音频时长（毫秒）
  * @property {boolean} forced 因为说得太长被强切，而不是自然收尾
  * @property {number} peakDb 这一块的峰值电平

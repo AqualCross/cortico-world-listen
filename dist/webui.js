@@ -19,13 +19,41 @@ const STYLE = `
 .li-meter[hidden] { display: none; }
 .li-ctl { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .li-narrow { max-width: 340px; }
+.li-listen-controls { width: 100%; min-width: 0; margin-inline: 0; }
+.li-listen-controls .li-source-row { margin: 20px 0 16px; }
+.li-listen-controls .li-app-row,
+.li-listen-controls .li-run-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; align-items: end; max-width: 480px; }
+.li-listen-controls .li-app-row { margin-bottom: 16px; }
+.li-listen-controls .li-control-field { display: flex; flex-direction: column; align-items: stretch; gap: 8px; min-width: 0; margin: 0; }
+.li-listen-controls .li-control-field > input,
+.li-listen-controls .li-control-field > select { width: 100%; max-width: none; box-sizing: border-box; }
+.li-listen-controls .li-app-row > .btn,
+.li-listen-controls .li-run-action > .btn,
+.li-listen-controls .li-control-field > input,
+.li-listen-controls .li-control-field > select { height: 40px; }
+.li-listen-controls .li-run-action { display: flex; align-items: center; gap: 12px; min-height: 40px; }
+.li-listen-controls .li-run-action > .btn { min-width: 104px; white-space: nowrap; flex-shrink: 0; }
+.li-listen-controls .li-run-action > .msgline { margin: 0; max-width: 180px; overflow-wrap: anywhere; }
+.li-listen-controls .li-run-row { grid-template-columns: minmax(0, 364px) 104px minmax(0, 1fr); max-width: none; }
+.li-listen-controls .li-run-action { display: contents; }
+.li-listen-controls .li-run-action > .msgline { align-self: center; margin-top: 24px; }
+@media (max-width: 520px) {
+  .li-listen-controls .li-run-row { grid-template-columns: minmax(0, 1fr) 104px; }
+  .li-listen-controls .li-run-action > .msgline { grid-column: 2; margin-top: 0; }
+}
+.li-listen-controls .li-app-row > select { grid-column: 1 / -1; width: 100%; }
+.li-listen-controls .msgline:empty { display: none; }
+@media (max-width: 380px) {
+  .li-listen-controls .li-app-row { grid-template-columns: minmax(0, 1fr); }
+  .li-listen-controls .li-app-row > .btn { justify-self: start; }
+}
 `;
 
 const ZH = {
   listTitle: '听到的',
   listDesc: '听觉切出来的语音块；可试听、复制附件句柄。要文字就把它交给语音转文本。',
   statusTitle: '状态',
-  statusDesc: '开关、监听目标与语音切分参数。',
+  statusDesc: '监听开关、声音来源与听觉模块。',
   state: '听觉',
   on: '听着',
   off: '停着',
@@ -52,6 +80,7 @@ const ZH = {
   noHandle: '（没有附件句柄）',
   forced: '被强切',
   archived: '只归档',
+  deliveryFailed: '事件写入失败',
   empty: '还没有听到语音块。到「状态」页打开听觉，或者让桌宠调用 listen。',
   connecting: '实时推送未连接',
   connected: '实时推送中',
@@ -59,7 +88,17 @@ const ZH = {
   busier: '处理中…',
   unknown: '未知',
   ctlTitle: '监听',
-  ctlDesc: '立即开始/停止；长期默认值在下面的配置组里。',
+  hearingModule: '听觉模块',
+  preparingModule: '正在准备 Silero，缺少的组件和模型将自动下载…',
+  preparationStages: {
+    'checking-runtime': '正在检查 Silero 运行组件…',
+    'installing-runtime': '正在安装 Silero 运行组件…',
+    'checking-model': '正在检查 Silero 模型…',
+    'downloading-model': '正在下载 Silero 模型…',
+    'saving-model': '正在保存 Silero 模型…',
+    ready: 'Silero 已就绪，正在保存选择…',
+  },
+  moduleReady: '听觉模块已更新',
   system: '系统声音',
   app: '应用',
   appField: '应用（进程名或 PID）',
@@ -138,6 +177,7 @@ const EN = {
   noHandle: '(no attachment handle)',
   forced: 'split',
   archived: 'archived only',
+  deliveryFailed: 'Event write failed',
   empty: 'No speech chunks yet. Start Hearing on the Status panel, or ask the pet to call listen.',
   connecting: 'Live feed disconnected',
   connected: 'Live feed connected',
@@ -145,7 +185,17 @@ const EN = {
   busier: 'Working…',
   unknown: 'unknown',
   ctlTitle: 'Listening',
-  ctlDesc: 'Start/stop right away; long-term defaults live in the config group below.',
+  hearingModule: 'Hearing module',
+  preparingModule: 'Preparing Silero; missing components and model will be downloaded…',
+  preparationStages: {
+    'checking-runtime': 'Checking Silero runtime…',
+    'installing-runtime': 'Installing Silero runtime…',
+    'checking-model': 'Checking Silero model…',
+    'downloading-model': 'Downloading Silero model…',
+    'saving-model': 'Saving Silero model…',
+    ready: 'Silero ready; saving selection…',
+  },
+  moduleReady: 'Hearing module updated',
   system: 'System audio',
   app: 'Application',
   appField: 'Application (process name or PID)',
@@ -222,9 +272,8 @@ function chunksPanel(ctx) {
   const tx = text(ctx.language);
   injectStyle(ctx);
 
-  const sheet = ctx.ui.sheet({ title: tx.listTitle, en: 'Heard', desc: tx.listDesc });
-  ctx.root.appendChild(sheet.el);
-  const body = sheet.body;
+  const body = ctx.ui.h('div', 'sheetbody li-heard-content');
+  ctx.root.appendChild(body);
 
   const stats = ctx.ui.statgrid();
   body.appendChild(stats);
@@ -306,7 +355,8 @@ function chunksPanel(ctx) {
     if (item.handle) bar.appendChild(ctx.ui.copyButton(item.handle, { label: tx.copyHandle }));
     bar.appendChild(ctx.ui.copyButton(item.path, { label: tx.copyFile }));
     bar.appendChild(ctx.ui.button(tx.remove, { variant: 'danger', size: 'sm', onClick: () => { void drop(item); } }));
-    if (!item.delivered) bar.appendChild(ctx.ui.pill(tx.archived, 'off'));
+    if (item.deliveryError) bar.appendChild(ctx.ui.pill(tx.deliveryFailed, 'off'));
+    else if (!item.delivered) bar.appendChild(ctx.ui.pill(tx.archived, 'off'));
     el.appendChild(bar);
     return el;
   };
@@ -448,98 +498,80 @@ function statusPanel(ctx) {
   const tx = text(ctx.language);
   injectStyle(ctx);
 
-  const sheet = ctx.ui.sheet({ title: tx.statusTitle, en: 'Status', desc: tx.statusDesc });
-  ctx.root.appendChild(sheet.el);
-  const body = sheet.body;
+  // Keep the panel at the host content's left edge rather than centering a narrow root.
+  ctx.root.style.width = '100%';
+  ctx.root.style.maxWidth = 'none';
+  ctx.root.style.marginInline = '0';
 
-  const stats = ctx.ui.statgrid();
-  body.appendChild(stats);
+  const body = ctx.ui.h('div', 'li-listen-controls');
+  ctx.root.appendChild(body);
+  let listening = false;
+  let pending = true;
+  let selectedModule = 'energy';
 
-  const ctl = ctx.ui.section(tx.ctlTitle, tx.ctlDesc);
+  const ctl = ctx.ui.h('div', 'li-listen-form');
   const syncAppRow = () => {
     appRow.style.display = srcSegment.value === 'app' ? '' : 'none';
   };
-  const sourceRow = ctx.ui.h('div', 'li-ctl');
+  const sourceRow = ctx.ui.h('div', 'li-ctl li-source-row');
   const srcSegment = ctx.ui.segmented([
     { value: 'system', label: tx.system },
     { value: 'app', label: tx.app },
   ], { size: 'md', value: 'system', onSelect: () => syncAppRow() });
   sourceRow.appendChild(srcSegment.el);
-  ctl.appendChild(sourceRow);
 
-  const appRow = ctx.ui.h('div', 'li-ctl');
+  const appRow = ctx.ui.h('div', 'li-app-row');
   const appInput = ctx.ui.input({ placeholder: 'chrome.exe / 1234', cls: 'mono' });
   appInput.classList.add('li-narrow');
   const appBtn = ctx.ui.button(tx.appPick, { size: 'sm', onClick: () => { void pickApp(); } });
   const appSelect = ctx.ui.select({ options: [] });
   appSelect.style.display = 'none';
-  appRow.append(ctx.ui.field(tx.appField, appInput), appBtn, appSelect);
-  ctl.appendChild(appRow);
+  const appField = ctx.ui.field(tx.appField, appInput);
+  appField.classList.add('li-control-field');
+  appRow.append(appField, appBtn, appSelect);
 
-  const runRow = ctx.ui.h('div', 'li-ctl');
-  const startBtn = ctx.ui.button(tx.start, { variant: 'primary', size: 'md', onClick: () => { void start(); } });
-  const stopBtn = ctx.ui.button(tx.stop, { variant: 'danger', size: 'md', onClick: () => { void stop(); } });
-  const fetchBtn = ctx.ui.button(tx.fetchModel, { size: 'md', onClick: () => { void fetchModel(); } });
-  runRow.append(startBtn, stopBtn, fetchBtn);
-  ctl.appendChild(runRow);
+  const runRow = ctx.ui.h('div', 'li-run-row');
+  const toggleBtn = ctx.ui.button(tx.start, { variant: 'primary', size: 'md', onClick: () => { if (!pending) void (listening ? stop() : start()); } });
+  toggleBtn.disabled = true;
+  const moduleSelect = ctx.ui.select({ options: [
+    { value: 'energy', label: tx.vadEnergy },
+    { value: 'silero', label: tx.vadSilero },
+  ] });
+  moduleSelect.disabled = true;
+  const moduleField = ctx.ui.field(tx.hearingModule, moduleSelect);
+  moduleField.classList.add('li-control-field');
+  const runAction = ctx.ui.h('div', 'li-run-action');
+  runAction.appendChild(toggleBtn);
+  runRow.append(moduleField, runAction);
+  moduleSelect.addEventListener('change', () => { void changeModule(); });
+  ctl.append(runRow, sourceRow, appRow);
 
   const ctlNote = ctx.ui.msgline('');
-  ctl.appendChild(ctlNote);
+  runAction.appendChild(ctlNote);
   body.appendChild(ctl);
-
-  const kvBox = ctx.ui.h('div');
-  body.appendChild(kvBox);
-
-  const vadBox = ctx.ui.h('div');
-  body.appendChild(vadBox);
-
-  const actions = ctx.ui.actions();
-  body.appendChild(actions);
 
   const note = ctx.ui.msgline('');
   body.appendChild(note);
 
+  const syncControls = () => {
+    toggleBtn.textContent = pending ? tx.busier : (listening ? tx.stop : tx.start);
+    toggleBtn.disabled = pending;
+    moduleSelect.disabled = pending || listening;
+    appInput.disabled = pending || listening;
+    appBtn.disabled = pending || listening;
+    appSelect.disabled = pending || listening;
+    srcSegment.el.style.pointerEvents = pending || listening ? 'none' : '';
+    srcSegment.el.inert = pending || listening;
+  };
   const render = (s) => {
-    const listening = Boolean(s?.listening);
-    stats.replaceChildren(
-      ctx.ui.stat({ k: tx.state, v: ctx.ui.pill(listening ? tx.on : tx.off, listening ? 'on' : 'off') }),
-      ctx.ui.stat({ k: tx.chunks, v: String(s?.chunks ?? 0) }),
-      ctx.ui.stat({ k: tx.target, v: s?.target || '—' }),
-      ctx.ui.stat({ k: tx.runtime, v: `${s?.node ?? '?'} · ${s?.platform ?? '?'}` }),
-    );
-    startBtn.disabled = listening;
-    stopBtn.disabled = !listening;
-    if (!listening && (s?.source === 'system' || s?.source === 'app')) srcSegment.setValue(s.source);
+    listening = Boolean(s?.listening);
+    selectedModule = s?.vad?.kind === 'silero' ? 'silero' : 'energy';
+    moduleSelect.value = selectedModule;
+    if (s?.source === 'system' || s?.source === 'app') srcSegment.setValue(s.source);
     if (s?.app && !appInput.value) appInput.value = s.app;
+    note.textContent = s?.lastError || '';
     syncAppRow();
-
-    vadBox.replaceChildren(ctx.ui.kv([
-      { k: tx.vadName, v: s?.vad?.kind === 'silero' ? tx.vadSilero : tx.vadEnergy },
-      { k: tx.sileroThreshold, v: String(s?.vad?.sileroThreshold ?? '—') },
-      { k: tx.threshold, v: `${s?.vad?.thresholdDb ?? '—'} dBFS` },
-      { k: tx.minSpeech, v: `${s?.vad?.minSpeechMs ?? '—'} ms` },
-      { k: tx.silence, v: `${s?.vad?.silenceMs ?? '—'} ms` },
-      { k: tx.maxUtt, v: `${s?.vad?.maxUtteranceMs ?? '—'} ms` },
-      { k: tx.preRoll, v: `${s?.vad?.preRollMs ?? '—'} ms` },
-      { k: tx.minUtt, v: `${s?.vad?.minUtteranceMs ?? '—'} ms` },
-      { k: tx.dropped, v: String(s?.dropped ?? 0) },
-    ]));
-
-    kvBox.replaceChildren(ctx.ui.kv([
-      { k: tx.wake, v: s?.wake === 'record' ? tx.wakeRecord : tx.wakeNotify },
-      { k: tx.control, v: s?.control ?? '—' },
-      { k: tx.dir, v: s?.store?.dir || '—' },
-      { k: tx.indexFile, v: s?.store?.indexFile || '—' },
-      { k: tx.keep, v: String(s?.store?.keep ?? '—') },
-      { k: tx.rate, v: `${s?.maxEventsPerMinute ?? 0} ${tx.rateUnit}` },
-      { k: tx.module, v: s?.module?.ok ? tx.moduleOk : `${tx.moduleOff}：${s?.module?.error ?? ''}` },
-      { k: tx.model, v: modelText(s) },
-      { k: tx.startedAt, v: s?.startedAt || tx.none },
-      { k: tx.autoStop, v: s?.autoStopAt || tx.none },
-      { k: tx.lastChunk, v: s?.lastChunkAt || tx.none },
-      { k: tx.archivedCount, v: String(s?.archived ?? 0) },
-      { k: tx.lastError, v: s?.lastError || tx.none },
-    ]));
+    syncControls();
   };
 
   const load = async (busy) => {
@@ -547,6 +579,7 @@ function statusPanel(ctx) {
     try {
       const s = await ctx.invoke('state', []);
       if (ctx.signal.aborted) return;
+      pending = false;
       render(s);
     } catch (err) {
       note.textContent = message(err);
@@ -556,27 +589,26 @@ function statusPanel(ctx) {
     }
   };
 
-  /** 模型那行的文案：有路径没文件标「未下载」。 */
-  const modelText = (s) => {
-    const model = s?.model ?? {};
-    if (!model.path) return tx.none;
-    return model.exists
-      ? `${ctx.ui.fmt.bytes(model.sizeBytes)} · ${model.path}`
-      : `${tx.modelMissing} · ${model.path}`;
-  };
-
-  const fetchModel = async () => {
-    const release = ctx.ui.busy(tx.busier, tx.fetchModel);
+  const changeModule = async () => {
+    const next = moduleSelect.value;
+    if (pending || listening) { moduleSelect.value = selectedModule; return; }
+    pending = true;
+    syncControls();
+    ctlNote.textContent = next === 'silero' ? tx.preparingModule : '';
     try {
-      const res = await ctx.invoke('fetchModel', []);
-      ctlNote.textContent = `${tx.fetched}：${res?.model?.path ?? ''}`;
-      ctx.ui.toast(tx.fetched, 'ok');
+      await ctx.invoke('prepareModule', [next]);
+      if (ctx.signal.aborted) return;
+      await ctx.setConfig('world:listen', { 'worlds.listen.vad': next });
+      selectedModule = next;
+      ctlNote.textContent = tx.moduleReady;
       await load(false);
     } catch (err) {
+      moduleSelect.value = selectedModule;
       ctlNote.textContent = message(err);
       ctx.ui.toast(message(err), 'bad');
     } finally {
-      release.dispose();
+      pending = false;
+      syncControls();
     }
   };
 
@@ -611,6 +643,8 @@ function statusPanel(ctx) {
   const start = async () => {
     const source = srcSegment.value;
     const app = source === 'app' ? appInput.value.trim() : '';
+    pending = true;
+    syncControls();
     const release = ctx.ui.busy(tx.busier, tx.start);
     try {
       const res = await ctx.invoke('start', [source, app]);
@@ -621,11 +655,15 @@ function statusPanel(ctx) {
       ctlNote.textContent = message(err);
       ctx.ui.toast(message(err), 'bad');
     } finally {
+      pending = false;
+      syncControls();
       release.dispose();
     }
   };
 
   const stop = async () => {
+    pending = true;
+    syncControls();
     const release = ctx.ui.busy(tx.busier, tx.stop);
     try {
       const res = await ctx.invoke('stop', []);
@@ -636,13 +674,11 @@ function statusPanel(ctx) {
       ctlNote.textContent = message(err);
       ctx.ui.toast(message(err), 'bad');
     } finally {
+      pending = false;
+      syncControls();
       release.dispose();
     }
   };
-
-  actions.append(
-    ctx.ui.button(tx.refresh, { size: 'sm', onClick: () => { void load(true); } }),
-  );
 
   ctx.own(ctx.stream({
     message: (raw) => {
@@ -653,6 +689,9 @@ function statusPanel(ctx) {
         return;
       }
       if (frame?.t === 'state' && frame.state) render(frame.state);
+      if (frame?.t === 'module-progress' && pending && tx.preparationStages[frame.stage]) {
+        ctlNote.textContent = tx.preparationStages[frame.stage];
+      }
     },
   }));
 

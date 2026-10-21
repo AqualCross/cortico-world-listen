@@ -113,8 +113,7 @@ pnpm install      # 或 npm install；原生件都是预编译的，不需要编
 | `enabled` | `false` | 是否把 `listen_*` 挂给桌宠 |
 | `source` | `system` | `system` = 整个系统的输出（WASAPI 环回）；`app` = 某个应用 |
 | `app` | 空 | `source: app` 时用：进程名（如 `chrome.exe`）或 PID |
-| `autoListen` | `false` | 打开：扩展挂载即开始听；关上：显式开始（控制台按钮，或桌宠调用 `listen`） |
-| `control` | `console-and-agent` | 谁能开听：`console-and-agent` 或 `console`（只许使用者从控制台开；桌宠仍可停） |
+| `control` | `console-and-agent` | 谁能开听：`console-and-agent` 或 `console`（只许使用者从控制台开；桌宠仍可停）。挂载不会自动开听，要用控制台按钮或桌宠调用 `listen` |
 | `wake` | `notify` | `notify` = 即时投递；`record` = 只归档不唤醒 |
 | `autoStopMinutes` | `15` | 打开后过多少分钟自动停；`0` = 不自动停 |
 | `vad` | `energy` | 切分方式：`energy`（能量门限，零依赖）或 `silero`（Silero VAD，需模型）；切换在下次开始监听时生效 |
@@ -140,7 +139,7 @@ pnpm install      # 或 npm install；原生件都是预编译的，不需要编
 | 音乐/提示音 | 会被当人声（能量上它们"一直在响"） | 基本不出块（实测 440Hz 正弦 0 段，真语音按停顿成段） |
 | 调参 | `thresholdDb`、`preRollMs` 等 | `sileroThreshold`；起说/静音/最长段仍共用 |
 
-选 `silero` 的模型来路（按优先级）：`sileroModel` 指本地文件 → 数据目录缓存（`<bot 数据目录>/listen/silero_vad.onnx`）→ 包内 `assets/silero_vad.onnx` → 控制台「状态」页点「获取 Silero 模型」自动下载（GitHub 发布资产，原子写）。下载失败的错误信息里会给出这三条出路；模型下载一次后离线可用。
+选 `silero` 的模型来路（按优先级）：`sileroModel` 指本地文件 → 数据目录缓存（`<bot 数据目录>/listen/silero_vad.onnx`）→ 包内 `assets/silero_vad.onnx` → 自动下载（GitHub 发布资产，原子写）。在「状态 → 听觉模块」选择 Silero 时会自动准备缺少的模型与运行组件；组件安装在数据目录的 `listen/runtime`，不修改扩展安装目录。准备成功才保存选择，失败保留原配置；模型下载一次后离线可用。
 
 切换方式：配置组里把 `vad` 改成 `silero`，**下次开始监听**生效；门限等 silero 参数是热改（切分器就地重建）。
 
@@ -155,7 +154,7 @@ pnpm install      # 或 npm install；原生件都是预编译的，不需要编
 ## 控制台页
 
 - **听到的**：听觉存下来的语音块（时间、时长、目标、大小、峰值、附件句柄），**重启也在**；可试听（读记录目录里那份文件）、复制句柄/路径、删除（连文件）、清空、打开文件夹、复制目录；页面顶部一行显示记录目录；听着的电平条实时走。
-- **状态**：开始/停止监听（选系统声音或某个应用——「列出有声应用」会列出当前有窗口的进程，选一个填进去）；切分方式、Silero 门限与模型状态（带「获取 Silero 模型」按钮）、全部切分参数、记录目录/索引/保留条数、限速、自动停止、模块可用性与最近错误。
+- **状态**：单按钮开始/停止监听，选择系统声音或某个应用，以及「听觉模块」（能量门限 / Silero，和配置页的切分方式同步）。选择 Silero 自动准备模型与运行组件，监听期间禁止切换；错误就地显示。参数、目录、保留条数与限速统一在配置页查看。
 
 「状态」页的开关是**即时控制**；长期默认值在页面下方的配置组里。
 
@@ -177,7 +176,7 @@ pnpm install      # 或 npm install；原生件都是预编译的，不需要编
 node tools/check.mjs
 ```
 
-重新生成 `describe.json`（改了工具声明或环境提示词后）：
+重新生成 `describe.json`（改了工具或事件声明后）：
 
 ```powershell
 node tools/describe.mjs
@@ -205,7 +204,7 @@ node tools/smoke.mjs --vad silero --model scratch\silero_vad.onnx --play scratch
 ```
 cortico-world-listen/
 ├─ package.json        # cortico: { kind: world, api: 6, displayName: 听觉, webUiClient, describe }
-├─ describe.json       # 自描述：工具、事件与环境提示词（node tools/describe.mjs 生成）
+├─ describe.json       # 自描述：工具与事件（node tools/describe.mjs 生成）
 ├─ CHANGELOG.md        # 每个版本一节，扩展市场按版本显示更新说明
 ├─ README.md
 ├─ src/
@@ -219,7 +218,6 @@ cortico-world-listen/
 │  ├─ chunks.js        # 语音块仓库：目录 + index.json，每块一个 WAV（编号、裁剪、删除）
 │  ├─ apps.js          # 进程名/PID → 目标进程（PowerShell 进程表 + 纯函数挑根）
 │  ├─ wav.js           # PCM16 → WAV 编码、WAV 头读取、文案
-│  └─ ENV_PROMPT.md    # 环境提示词模板（只在听着的时候出现）
 ├─ dist/webui.js       # 浏览器侧面板 bundle（export default { panels }）
 └─ tools/
    ├─ check.mjs        # 离线检查

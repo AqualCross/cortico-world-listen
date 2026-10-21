@@ -15,11 +15,50 @@
  */
 import { existsSync, mkdirSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
+import { spawn } from 'node:child_process';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 
 import { rmsDb } from './vad.js';
 
 const require = createRequire(import.meta.url);
+
+/** Prepare the optional runtime without modifying the extension's installation. */
+export async function ensureSileroRuntime({ dataDir, load = loadSherpa, onProgress = () => {} } = {}) {
+  onProgress('checking-runtime');
+  try { return load(); } catch { /* Try the private runtime before installing. */ }
+  const dir = join(dataDir, 'listen', 'runtime');
+  const localRequire = createRequire(join(dir, 'package.json'));
+  try { return localRequire('sherpa-onnx-node'); } catch { /* Not installed yet. */ }
+  const candidates = [
+    process.resourcesPath && join(process.resourcesPath, 'app', 'node_modules', 'pnpm', 'bin', 'pnpm.cjs'),
+    ...String(process.env.PATH ?? '').split(process.platform === 'win32' ? ';' : ':')
+      .map((p) => join(p, 'node_modules', 'npm', 'bin', 'npm-cli.js')),
+  ];
+  const cli = candidates.find((p) => p && existsSync(p));
+  if (!cli) throw new Error('找不到包管理器，无法自动安装 Silero 运行组件。请安装扩展的可选依赖后重试。');
+  mkdirSync(dir, { recursive: true });
+  if (!existsSync(join(dir, 'package.json'))) writeFileSync(join(dir, 'package.json'), '{"private":true}');
+  const pnpm = cli.endsWith('pnpm.cjs');
+  onProgress('installing-runtime');
+  await new Promise((resolveInstall, reject) => {
+    const child = spawn(process.execPath, [cli, ...(pnpm ? ['add', '--dir', dir] : ['install', '--prefix', dir]), 'sherpa-onnx-node@^1.13.8'], {
+      windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+    });
+    let output = '';
+    const collect = (b) => { output = (output + b.toString()).slice(-4000); };
+    child.stdout.on('data', collect);
+    child.stderr.on('data', collect);
+    const timeout = setTimeout(() => { child.kill(); reject(new Error('安装 Silero 运行组件超时，请重试。')); }, 300000);
+    child.on('error', (err) => { clearTimeout(timeout); reject(err); });
+    child.on('close', (code) => {
+      clearTimeout(timeout);
+      if (code === 0) resolveInstall();
+      else reject(new Error(`安装 Silero 运行组件失败：${output}`));
+    });
+  });
+  return localRequire('sherpa-onnx-node');
+}
 
 /** 官方发布里的 silero 模型（sherpa-onnx 的 asr-models 资产）。 */
 export const SILERO_MODEL_URL = 'https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx';
@@ -107,7 +146,9 @@ export async function ensureSileroModel({
   allowDownload = true,
   minBytes = MODEL_MIN_BYTES,
   log,
+  onProgress = () => {},
 } = {}) {
+  onProgress('checking-model');
   const state = modelState({ cfgPath, dataDir, packageDir, botDir });
   if (state.exists) return state;
   const cfg = resolveModelPath(cfgPath, botDir);
@@ -119,6 +160,7 @@ export async function ensureSileroModel({
     throw new Error(`silero 模型还没下载（缓存位置：${target}）。到控制台「听觉 → 状态」点「获取 Silero 模型」，或设置 worlds.listen.sileroModel 指向本地文件。`);
   }
   const doFetch = typeof fetchImpl === 'function' ? fetchImpl : fetch;
+  onProgress('downloading-model');
   let buf;
   try {
     const res = await doFetch(SILERO_MODEL_URL, { redirect: 'follow', signal: AbortSignal.timeout(timeoutMs) });
@@ -131,6 +173,7 @@ export async function ensureSileroModel({
   if (buf.length < minBytes) {
     throw new Error(`下载到的 silero 模型只有 ${buf.length} 字节，不像真模型（${SILERO_MODEL_URL}）。`);
   }
+  onProgress('saving-model');
   try {
     mkdirSync(dirname(target), { recursive: true });
     const tmp = `${target}.tmp-${process.pid}`;
@@ -159,6 +202,8 @@ function peakOfFloat(samples) {
 export class SileroSegmenter {
   #vad = null;
   #signature = '';
+  #samplesFed = 0;
+  #clockAnchors = [];
 
   constructor(opts = {}) {
     this.sampleRate = Number(opts.sampleRate) || 16000;
@@ -222,6 +267,8 @@ export class SileroSegmenter {
     }, this.#bufferSeconds());
     // 段的 start 是「从 VAD 建起来到现在喂过的样本数」；用它把墙上时钟映射回来。
     this.baseAt = this.now();
+    this.#samplesFed = 0;
+    this.#clockAnchors = [];
     this.#signature = this.#signatureOf();
   }
 
@@ -264,11 +311,18 @@ export class SileroSegmenter {
    */
   push(frame, atMs) {
     this.lastDb = rmsDb(frame);
+    // Capture omits silent packets; anchor resumed audio to the wall clock.
+    if (!this.#clockAnchors.length || atMs - this.lastFrameAt > this.frameMs * 2) {
+      this.#clockAnchors.push({ sample: this.#samplesFed, at: atMs - frame.length / this.sampleRate * 1000 });
+    }
+    const oldest = this.#samplesFed - this.#bufferSeconds() * this.sampleRate;
+    while (this.#clockAnchors.length > 1 && this.#clockAnchors[1].sample <= oldest) this.#clockAnchors.shift();
     this.lastFrameAt = atMs;
     this.quietFlushed = false;
     const f32 = new Float32Array(frame.length);
     for (let i = 0; i < frame.length; i += 1) f32[i] = frame[i] / 32768;
     this.#vad.acceptWaveform(f32);
+    this.#samplesFed += frame.length;
     return this.#drain();
   }
 
@@ -316,9 +370,12 @@ export class SileroSegmenter {
         pcm[i] = v >= 1 ? 32767 : v <= -1 ? -32768 : Math.round(v * 32767);
       }
       const startSamples = Number(seg?.start) || 0;
+      const anchor = this.#clockAnchors.findLast((a) => a.sample <= startSamples);
       out.push({
         pcm,
-        startAt: this.baseAt + (startSamples / this.sampleRate) * 1000,
+        startAt: anchor
+          ? anchor.at + (startSamples - anchor.sample) / this.sampleRate * 1000
+          : this.baseAt + (startSamples / this.sampleRate) * 1000,
         durationMs,
         // 够到单块上限的多半是 silero 在 maxSpeechDuration 处强切的。
         forced: durationMs >= this.maxUtteranceMs - this.frameMs,
