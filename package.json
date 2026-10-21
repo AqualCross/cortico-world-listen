@@ -1,6 +1,6 @@
 {
   "name": "cortico-world-listen",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "type": "module",
   "description": "听觉（Listen）—— 给 Coopanion 桌宠的 cortico World 扩展：监听系统声音或某个应用的音频，自动把语音切成块（能量门限或可选的 Silero VAD），并把每块作为事件投进 cortico 事件流（附件是 WAV），由 agent 决定接下来做什么（比如交给 stt_transcribe 转写成文字）。 / A cortico World extension that captures system or per-application audio, segments speech locally (energy gate or optional Silero VAD), and pushes each chunk into the cortico event stream as a WAV attachment for the agent to use.",
   "license": "MIT",

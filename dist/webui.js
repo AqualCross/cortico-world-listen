@@ -312,6 +312,7 @@ function chunksPanel(ctx) {
   };
 
   const render = (data) => {
+    void ctx.refresh().catch(() => { /* Synchronize the host record-count badges. */ });
     const items = Array.isArray(data?.items) ? data.items : [];
     const s = data?.state ?? {};
     lastCount = typeof data?.count === 'number' ? data.count : items.length;
@@ -464,6 +465,7 @@ function chunksPanel(ctx) {
           break;
         }
         case 'state':
+          void ctx.refresh().catch(() => {});
           meter.el.hidden = !frame.state?.listening;
           break;
         case 'cleared':
@@ -572,6 +574,8 @@ function statusPanel(ctx) {
     note.textContent = s?.lastError || '';
     syncAppRow();
     syncControls();
+    // The host owns the header badges; panel state updates do not repaint them.
+    void ctx.refresh().catch(() => { /* Keep the controls usable if header refresh fails. */ });
   };
 
   const load = async (busy) => {
