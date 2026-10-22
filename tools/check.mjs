@@ -218,7 +218,7 @@ const toolOf = (world, name) => {
 };
 
 /** 起一段语音再收尾：开口 10 帧，停顿 30 帧；返回喂完之后的时钟。 */
-async function speakOnce(rig, { loudDb = -20, quietDb = -60, speechFrames = 12 } = {}) {
+async function speakOnce(rig, { loudDb = -20, quietDb = -60, speechFrames = 24 } = {}) {
   rig.feedFrames(quietDb, 16); // preRoll 背景
   rig.feedFrames(loudDb, speechFrames); // 开口
   rig.feedFrames(quietDb, 30); // 收尾静音（600ms）
@@ -779,8 +779,8 @@ try {
     eq(o.trigger, 'debounce', '合批方式');
     assert(e.text.includes('听到一段语音：'), `正文：${e.text}`);
     assert(e.text.includes('系统声音'), '正文带来源');
-    // 16 静 + 12 响：开口在第 26 帧，保留 16 帧 preRoll + 2 响 + 30 静 = 48 帧。
-    eq(e.meta.durationMs, 48 * 20, `meta 时长：${e.meta.durationMs}`);
+    // 16 静 + 24 响（默认起说 400ms）：开口在第 36 帧，保留 16 帧 preRoll + 4 响 + 30 静 = 50 帧。
+    eq(e.meta.durationMs, 50 * 20, `meta 时长：${e.meta.durationMs}`);
     eq(e.meta.source, 'system', 'meta source');
     assert(Math.abs(new Date(e.meta.startedAt).getTime() - rig.clock.now()) < 2000, 'energy 起点在实际采集时间附近，不重复累加启动时间');
     const bytes = Buffer.from(e.blobs[0].bytes);

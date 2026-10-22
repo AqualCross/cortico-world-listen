@@ -355,7 +355,9 @@ export class SileroSegmenter {
   #drain() {
     const out = [];
     while (!this.#vad.isEmpty()) {
-      const seg = this.#vad.front();
+      // front(true) 建的是外部缓冲，Electron 的 V8 内存笼禁止（External buffers are not allowed）；
+      // false 让它复制进普通 ArrayBuffer。
+      const seg = this.#vad.front(false);
       this.#vad.pop();
       const samples = seg?.samples;
       if (!samples || !samples.length) continue;

@@ -458,7 +458,16 @@ export class ListenWorld {
       lastError: '',
     };
     this.#timer = this.#setInterval(() => this.#tick(), 250);
-    this.#host?.log?.info?.('听觉开始监听', { source, app: appLabel, pid });
+    this.#host?.log?.info?.('听觉开始监听', {
+      source,
+      app: appLabel,
+      pid,
+      vad: kind,
+      // 两种切分器的门限单位不同：概率 vs dBFS。
+      ...(kind === 'silero'
+        ? { sileroThreshold: this.#num('sileroThreshold', 0.1, 0.9) }
+        : { thresholdDb: this.#num('thresholdDb', -80, -10) }),
+    });
     this.#broadcast({ t: 'state', state: this.#snapshot() });
     return this.#snapshot();
   }

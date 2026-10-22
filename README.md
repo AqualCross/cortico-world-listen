@@ -121,12 +121,12 @@ pnpm install      # 或 npm install；原生件都是预编译的，不需要编
 | `autoStopMinutes` | `15` | 打开后过多少分钟自动停；`0` = 不自动停 |
 | `vad` | `energy` | 切分方式：`energy`（能量门限，零依赖）或 `silero`（Silero VAD，需模型）；切换在下次开始监听时生效 |
 | `thresholdDb` | `-42` | 语音门限（dBFS）：RMS 低于它算安静；仅能量模式 |
-| `minSpeechMs` | `200` | 连续越过门限这么久才算开口；咳嗽、键盘、提示音挡在这；silero 下是它的最短语音时长 |
+| `minSpeechMs` | `400` | 连续越过门限这么久才算开口；咳嗽、键盘、提示音挡在这；silero 下是它的最短语音时长 |
 | `silenceMs` | `600` | 安静这么久算一块说完；silero 下也是它的静音结束时长 |
 | `maxUtteranceMs` | `15000` | 单块最长；到点强切，接着收下一段；silero 下是它的最长语音段 |
 | `preRollMs` | `320` | 开口之前再多带一段（第一个字总在电平越线之前）；仅能量模式 |
-| `minUtteranceMs` | `400` | 短于这个的碎片直接丢 |
-| `sileroThreshold` | `0.5` | Silero 的语音概率门限（0.1–0.9）：越高越严格；仅 silero |
+| `minUtteranceMs` | `1000` | 短于这个的碎片直接丢 |
+| `sileroThreshold` | `0.4` | Silero 的语音概率门限（0.1–0.9）：越高越严格；仅 silero |
 | `sileroModel` | 空 | Silero 模型路径；留空 = 数据目录里的缓存（控制台可一键获取），或指本地的 `silero_vad.onnx` |
 | `maxEventsPerMinute` | `30` | 每 60 秒最多即时投递多少块，超出只归档；`0` = 不限 |
 | `saveDir` | 空 | 记录目录：留空 = 插件数据目录下的 `listen/`；每块一个 WAV 文件 + 一份 `index.json` |
