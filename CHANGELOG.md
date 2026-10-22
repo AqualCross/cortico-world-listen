@@ -7,6 +7,7 @@
 - 修复 Electron 下 Silero 切分必报 `External buffers are not allowed`：取段改用 `front(false)`，复制进普通 ArrayBuffer。
 - 「听觉开始监听」日志带上切分类型与当前门限（silero 概率 / energy dBFS）。
 - 默认参数按实测调整：`sileroThreshold` 0.5 → 0.4，`minSpeechMs` 200 → 400，`minUtteranceMs` 400 → 1000（引擎仍默认 energy，零依赖）。
+- 移除配置页里与框架 World 开关重复的「启用」项；World 的启用与停用统一在 World 页。
 
 ## 0.4.0
 
