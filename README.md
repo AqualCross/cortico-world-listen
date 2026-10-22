@@ -72,7 +72,7 @@ pnpm install      # 或 npm install；原生件都是预编译的，不需要编
   ```
 - **手工连**：把 `data/extensions/node_modules/cortico-world-listen` 做成指向本目录的目录联接，并在 `extensions/package.json` 里加 `"cortico-world-listen": "link:D:\\path\\to\\cortico-world-listen"`。
 
-**3. 重启 Coopanion**：扩展是 ESM 模块，进程内不会重新加载。重启后在 `config.json` 的 `worlds.listen.enabled` 上打开（控制台里也有这个开关），`listen_*` 才会挂给桌宠。
+**3. 重启 Coopanion**：扩展是 ESM 模块，进程内不会重新加载。重启后在 World 页启用本 World（写 `config.json` 的 `worlds.listen.enabled = true`），`listen_*` 才会挂给桌宠。
 
 > 原生件是进程内加载的：**改了包里的代码或重装依赖都要重启应用**。单平台注意事项：目前只支持 Windows（`preflight` 会在别的系统上拒绝激活）。
 

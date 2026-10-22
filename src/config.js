@@ -15,7 +15,7 @@ export const EVENT_TYPE = 'listen.chunk';
 export const FRAME_MS = 20;
 export const SAMPLE_RATE = 16000;
 
-/** `worlds.listen` 段的默认值；键名与 configGroup 里的路径一一对应。 */
+/** `worlds.listen` 段的默认值；`enabled` 由框架的 World 开关管理，其余键与 configGroup 里的路径一一对应。 */
 export const DEFAULTS = Object.freeze({
   enabled: false,
   source: 'system',
@@ -63,8 +63,6 @@ const ZH = {
   stateError: (message) => `出错了：${message}`,
   config: {
     title: '听觉',
-    enabled: '启用听觉',
-    enabledDesc: '开启后桌宠才拿到听觉的工具（listen_act / listen_read），控制台也会出现「听觉」页。',
     source: '听什么',
     sourceDesc: 'system = 整个系统的输出（WASAPI 环回）；app = 某个应用的音频（按进程树，Windows 10 2004 及以上）。',
     app: '应用',
@@ -123,8 +121,6 @@ const EN = {
   stateError: (message) => `error: ${message}`,
   config: {
     title: 'Hearing',
-    enabled: 'Enable Hearing',
-    enabledDesc: 'Turns on the listening tools for the bot (listen_act / listen_read) and adds the Hearing page to the WebUI.',
     source: 'Listen to',
     sourceDesc: 'system = everything the machine plays (WASAPI loopback); app = one application (process tree, Windows 10 2004+).',
     app: 'Application',
@@ -168,7 +164,7 @@ export function text(language = 'zh') {
   return language === 'en' ? EN : ZH;
 }
 
-/** WebUI 的配置组；路径必须落在 `worlds.listen.` 段内，且每个键都在 DEFAULTS 里有对应项。 */
+/** WebUI 的配置组；路径必须落在 `worlds.listen.` 段内，且每个键都在 DEFAULTS 里有对应项（`enabled` 除外，它由框架的 World 开关渲染）。 */
 export function configGroup(language = 'zh') {
   const t = text(language).config;
   const K = `worlds.${ID}`;
@@ -179,7 +175,6 @@ export function configGroup(language = 'zh') {
       type: 'object',
       title: t.title,
       properties: {
-        [`${K}.enabled`]: { type: 'boolean', title: t.enabled, description: t.enabledDesc, 'x-hot': true },
         [`${K}.source`]: {
           type: 'string',
           title: t.source,
