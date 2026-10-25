@@ -123,6 +123,7 @@ export class Chunks {
       handle: String(entry.handle ?? ''),
       forced: Boolean(entry.forced),
       peakDb: numOf(entry.peakDb),
+      aedLabel: String(entry.aedLabel ?? ''),
       delivered: entry.delivered !== false,
       deliveryError: String(entry.deliveryError ?? ''),
     };
@@ -231,6 +232,7 @@ export class Chunks {
         handle: String(entry.handle ?? ''),
         forced: Boolean(entry.forced),
         peakDb: numOf(entry.peakDb),
+        aedLabel: String(entry.aedLabel ?? ''),
         delivered: entry.delivered !== false,
         deliveryError: String(entry.deliveryError ?? ''),
       });

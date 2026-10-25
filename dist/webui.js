@@ -89,14 +89,14 @@ const ZH = {
   unknown: '未知',
   ctlTitle: '监听',
   hearingModule: '听觉模块',
-  preparingModule: '正在准备 Silero，缺少的组件和模型将自动下载…',
+  preparingModule: '正在准备 VAD，缺少的组件和模型将自动下载…',
   preparationStages: {
-    'checking-runtime': '正在检查 Silero 运行组件…',
-    'installing-runtime': '正在安装 Silero 运行组件…',
-    'checking-model': '正在检查 Silero 模型…',
-    'downloading-model': '正在下载 Silero 模型…',
-    'saving-model': '正在保存 Silero 模型…',
-    ready: 'Silero 已就绪，正在保存选择…',
+    'checking-runtime': '正在检查 VAD 运行组件…',
+    'installing-runtime': '正在安装 VAD 运行组件…',
+    'checking-model': '正在检查 VAD 模型…',
+    'downloading-model': '正在下载 VAD 模型…',
+    'saving-model': '正在保存 VAD 模型…',
+    ready: 'VAD 已就绪，正在保存选择…',
   },
   moduleReady: '听觉模块已更新',
   system: '系统声音',
@@ -125,6 +125,7 @@ const ZH = {
   vadName: '切分方式',
   vadEnergy: '能量门限',
   vadSilero: 'Silero VAD',
+  vadFirered: 'FireRed VAD',
   sileroThreshold: 'Silero 门限',
   model: 'Silero 模型',
   modelMissing: '未下载',
@@ -188,14 +189,14 @@ const EN = {
   unknown: 'unknown',
   ctlTitle: 'Listening',
   hearingModule: 'Hearing module',
-  preparingModule: 'Preparing Silero; missing components and model will be downloaded…',
+  preparingModule: 'Preparing VAD; missing components and model will be downloaded…',
   preparationStages: {
-    'checking-runtime': 'Checking Silero runtime…',
-    'installing-runtime': 'Installing Silero runtime…',
-    'checking-model': 'Checking Silero model…',
-    'downloading-model': 'Downloading Silero model…',
-    'saving-model': 'Saving Silero model…',
-    ready: 'Silero ready; saving selection…',
+    'checking-runtime': 'Checking VAD runtime…',
+    'installing-runtime': 'Installing VAD runtime…',
+    'checking-model': 'Checking VAD model…',
+    'downloading-model': 'Downloading VAD model…',
+    'saving-model': 'Saving VAD model…',
+    ready: 'VAD ready; saving selection…',
   },
   moduleReady: 'Hearing module updated',
   system: 'System audio',
@@ -224,6 +225,7 @@ const EN = {
   vadName: 'Segmentation',
   vadEnergy: 'energy gate',
   vadSilero: 'Silero VAD',
+  vadFirered: 'FireRed VAD',
   sileroThreshold: 'Silero threshold',
   model: 'Silero model',
   modelMissing: 'not downloaded',
@@ -542,6 +544,7 @@ function statusPanel(ctx) {
   const moduleSelect = ctx.ui.select({ options: [
     { value: 'energy', label: tx.vadEnergy },
     { value: 'silero', label: tx.vadSilero },
+    { value: 'firered', label: tx.vadFirered },
   ] });
   moduleSelect.disabled = true;
   const moduleField = ctx.ui.field(tx.hearingModule, moduleSelect);
@@ -571,7 +574,7 @@ function statusPanel(ctx) {
   };
   const render = (s) => {
     listening = Boolean(s?.listening);
-    selectedModule = s?.vad?.kind === 'silero' ? 'silero' : 'energy';
+    selectedModule = s?.vad?.kind === 'silero' || s?.vad?.kind === 'firered' ? s.vad.kind : 'energy';
     moduleSelect.value = selectedModule;
     if (s?.source === 'system' || s?.source === 'app') srcSegment.setValue(s.source);
     if (s?.app && !appInput.value) appInput.value = s.app;
@@ -602,7 +605,7 @@ function statusPanel(ctx) {
     if (pending || listening) { moduleSelect.value = selectedModule; return; }
     pending = true;
     syncControls();
-    ctlNote.textContent = next === 'silero' ? tx.preparingModule : '';
+    ctlNote.textContent = next === 'silero' || next === 'firered' ? tx.preparingModule : '';
     try {
       await ctx.invoke('prepareModule', [next]);
       if (ctx.signal.aborted) return;

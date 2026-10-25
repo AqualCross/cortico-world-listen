@@ -62,6 +62,9 @@ const config = await import(pathToFileURL(join(pkgDir, 'src', 'config.js')).href
 const wav = await import(pathToFileURL(join(pkgDir, 'src', 'wav.js')).href);
 const vad = await import(pathToFileURL(join(pkgDir, 'src', 'vad.js')).href);
 const silero = await import(pathToFileURL(join(pkgDir, 'src', 'silero.js')).href);
+const firered = await import(pathToFileURL(join(pkgDir, 'src', 'firered.js')).href);
+const fbank = await import(pathToFileURL(join(pkgDir, 'src', 'fbank.js')).href);
+const fireredAed = await import(pathToFileURL(join(pkgDir, 'src', 'firered-aed.js')).href);
 const apps = await import(pathToFileURL(join(pkgDir, 'src', 'apps.js')).href);
 const chunksMod = await import(pathToFileURL(join(pkgDir, 'src', 'chunks.js')).href);
 const worldMod = await import(pathToFileURL(join(pkgDir, 'src', 'world.js')).href);
@@ -132,7 +135,7 @@ function makeWorld(overrides = {}, opts = {}) {
     };
     return capture;
   };
-  const cfg = { ...def.defaults(), enabled: true, ...overrides };
+  const cfg = { ...def.defaults(), aedMode: 'off', enabled: true, ...overrides };
   const world = new ListenWorld({
     cfg,
     dataDir: opts.dataDir ?? join(scratch, 'data', `rig-${rigSeq}`),
@@ -145,6 +148,7 @@ function makeWorld(overrides = {}, opts = {}) {
     resolveApp: opts.resolveApp ?? (async (target) => ({ pid: 4242, name: String(target), title: '', numeric: false })),
     listApps: opts.listApps ?? (async () => [{ name: 'chrome', pid: 4242, title: 'example' }]),
     silero: opts.silero,
+    aed: opts.aed,
   });
   return {
     world,
@@ -649,6 +653,226 @@ try {
     assert(Array.isArray(out), '是数组');
     eq(out.length, 1, '假件补的 100ms 尾段');
     eq(seg.flush().length, 0, '再 flush 不给重复的');
+  });
+
+  // -------------------------------------------------------------------------
+  console.log('FireRed 前端与后处理');
+
+  /** 造一个 kaldiio 布局的 cmvn.ark（均值 0、标准差 1）。 */
+  function cmvnArk(dim = 80) {
+    const token = Buffer.from('\0BDM ', 'latin1');
+    const head = Buffer.alloc(10);
+    head[0] = 4;
+    head.writeInt32LE(2, 1);
+    head[5] = 4;
+    head.writeInt32LE(dim + 1, 6);
+    const data = Buffer.alloc(2 * (dim + 1) * 8);
+    for (let d = 0; d < dim; d += 1) data.writeDoubleLE(0, d * 8);
+    data.writeDoubleLE(1, dim * 8);
+    for (let d = 0; d < dim; d += 1) data.writeDoubleLE(1, (dim + 1 + d) * 8);
+    data.writeDoubleLE(1, (2 * dim + 1) * 8);
+    return Buffer.concat([token, head, data]);
+  }
+
+  check('fbank：帧数、维度与有限值', () => {
+    const fb = new fbank.KaldiFbank();
+    const n = 8000;
+    const pcm = new Int16Array(n);
+    for (let i = 0; i < n; i += 1) pcm[i] = Math.round(Math.sin((2 * Math.PI * 1000 * i) / 16000) * 0.5 * 32767);
+    const frames = [];
+    for (let i = 0; i < n; i += 320) frames.push(...fb.accept(pcm.subarray(i, i + 320)));
+    eq(frames.length, Math.floor((n - 400) / 160) + 1, '帧数');
+    eq(frames[0].length, 80, '维度');
+    assert(frames.every((f) => f.every((v) => Number.isFinite(v))), '应当全是有限值');
+    assert(frames[5].some((v) => v > -15), '有声帧不该全是 log 地板');
+  });
+
+  check('CMVN：解析 kaldi 双精度矩阵并换算均值/标准差', () => {
+    const parsed = fbank.parseCmvnMatrix(cmvnArk(80));
+    eq(parsed.rows, 2, '行数');
+    eq(parsed.cols, 81, '列数');
+    const cmvn = fbank.cmvnFromMatrix(parsed);
+    eq(cmvn.dim, 80, '维度');
+    eq(cmvn.means[0], 0, '均值');
+    eq(cmvn.istd[0], 1, '标准差的倒数');
+    const feat = new Float32Array(80).fill(2);
+    const out = fbank.applyCmvn(feat, cmvn);
+    eq(out[0], 2, 'CMVN 结果');
+  });
+
+  check('FireRed 后处理：起停、最短静音与最长段', () => {
+    const pp = new firered.StreamVadPostprocessor({
+      smoothWindowSize: 1, threshold: 0.5, padStartFrame: 0,
+      minSpeechFrame: 3, maxSpeechFrame: 10, minSilenceFrame: 3,
+    });
+    const results = [];
+    const feed = (n, v) => { for (let i = 0; i < n; i += 1) results.push(pp.process(v)); };
+    feed(2, 0);
+    feed(5, 0.9);
+    feed(4, 0);
+    const start = results.find((r) => r.isStart);
+    const end = results.find((r) => r.isEnd);
+    assert(start && end, '应当有起止');
+    assert(start.startFrame === 2, `起点：${start.startFrame}`); // pad 至少等于平滑窗（1 帧）
+    assert(end.endFrame >= 9, `终点：${end.endFrame}`);
+
+    const ppMax = new firered.StreamVadPostprocessor({
+      smoothWindowSize: 1, threshold: 0.5, padStartFrame: 0,
+      minSpeechFrame: 2, maxSpeechFrame: 5, minSilenceFrame: 2,
+    });
+    const maxResults = [];
+    for (let i = 0; i < 10; i += 1) maxResults.push(ppMax.process(0.9));
+    assert(maxResults.some((r) => r.isEnd), '到最长段应当切');
+    assert(maxResults.some((r) => r.isStart), '强切后立即开新段');
+  });
+
+  await checkAsync('FireRed 切分器：假 ONNX 会话，段经回调交付', async () => {
+    const dir = join(scratch, 'firered-seg');
+    mkdirSync(dir, { recursive: true });
+    const cmvnPath = join(dir, 'cmvn.ark');
+    writeFileSync(cmvnPath, cmvnArk(80));
+
+    const calls = [];
+    let framesSeen = 0;
+    const fakeOrt = {
+      Tensor: class {
+        constructor(type, data, dims) { this.type = type; this.data = data; this.dims = dims; }
+      },
+    };
+    const fakeSession = {
+      async run({ feat, caches_in }) {
+        calls.push({ frames: feat.dims[1], caches: caches_in.dims });
+        const n = feat.dims[1];
+        const probs = new Float32Array(n);
+        for (let i = 0; i < n; i += 1) {
+          const t = framesSeen + i; // 10ms 帧序号
+          probs[i] = t > 30 && t < 130 ? 0.95 : 0.02; // 1s 语音
+        }
+        framesSeen += n;
+        return { probs: { data: probs, dims: [1, n, 1] }, caches_out: { data: new Float32Array(8 * 128 * 19), dims: [8, 1, 128, 19] } };
+      },
+    };
+    const utts = [];
+    const seg = await firered.FireRedSegmenter.create({
+      modelPath: 'unused.onnx',
+      cmvnPath,
+      ort: fakeOrt,
+      session: fakeSession,
+      sampleRate: 16000,
+      frameMs: 20,
+      threshold: 0.5,
+      minSpeechMs: 100,
+      silenceMs: 200,
+      maxUtteranceMs: 5000,
+      minUtteranceMs: 100,
+      now: () => 0,
+      onUtterance: (u) => utts.push(u),
+    });
+    let at = 0;
+    const pcm = new Int16Array(320);
+    for (let i = 0; i < 200; i += 1) { // 4s
+      at += 20;
+      seg.push(pcm, at);
+    }
+    await seg.flush();
+    eq(calls.length > 0, true, '应当调用过模型');
+    eq(calls[0].caches.join(','), '8,1,128,19', 'cache 形状');
+    assert(utts.length >= 1, `应当出一段：${utts.length}`);
+    assert(utts[0].durationMs > 500 && utts[0].durationMs < 1600, `段长：${utts[0].durationMs}`);
+    assert(Number.isFinite(utts[0].startAt), '起点是数字');
+  });
+
+  await checkAsync('FireRed 模型准备：两个文件一起下载并进入缓存', async () => {
+    const dataDir = join(scratch, 'firered-model');
+    const missing = firered.fireRedModelState({ cfgPath: '', dataDir });
+    eq(missing.exists, false, '初始没有');
+    eq(missing.path, join(dataDir, 'listen', 'firered', firered.FIRERED_MODEL_FILE), '缓存位置');
+    const bytes = { model: Buffer.alloc(1_100_000, 1), cmvn: Buffer.alloc(1000, 2) };
+    const model = await firered.ensureFireRedModel({
+      cfgPath: '',
+      dataDir,
+      fetchImpl: async (url) => {
+        if (String(url).includes('cmvn.ark')) return new Response(bytes.cmvn);
+        assert(String(url) === firered.FIRERED_MODEL_URL, `URL：${url}`);
+        return new Response(bytes.model);
+      },
+    });
+    eq(model.source, 'download', '来源');
+    assert(existsSync(model.path) && existsSync(model.cmvnPath), '两个文件都落盘');
+    const state = firered.fireRedModelState({ cfgPath: '', dataDir });
+    eq(state.source, 'cache', '缓存可见');
+    eq(state.sizeBytes, bytes.model.length + bytes.cmvn.length, '总大小');
+  });
+
+  await checkAsync('AED 分类器：三分类标签与 voice 判定', async () => {
+    const dir = join(scratch, 'aed-cls');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'cmvn.ark'), cmvnArk(80));
+    const ort = { Tensor: class { constructor(type, data, dims) { this.type = type; this.data = data; this.dims = dims; } } };
+    const make = async (fn) => fireredAed.FireRedAedClassifier.create({
+      modelPath: 'unused.onnx',
+      cmvnPath: join(dir, 'cmvn.ark'),
+      ort,
+      session: {
+        async run({ feat }) {
+          const n = feat.dims[1];
+          const probs = new Float32Array(n * 3);
+          for (let i = 0; i < n; i += 1) {
+            const [a, b, c] = fn(i);
+            probs[i * 3] = a; probs[i * 3 + 1] = b; probs[i * 3 + 2] = c;
+          }
+          return { probs: { data: probs } };
+        },
+      },
+    });
+    const speech = await (await make(() => [0.9, 0.02, 0.6])).classify(new Int16Array(16000));
+    eq(speech.label, 'speech', '说话');
+    assert(speech.voice > 0.8, `voice：${speech.voice}`);
+    const music = await (await make(() => [0.02, 0.03, 0.95])).classify(new Int16Array(16000));
+    eq(music.label, 'music', '音乐');
+    assert(music.voice < 0.1, `voice：${music.voice}`);
+    const singing = await (await make(() => [0.02, 0.9, 0.9])).classify(new Int16Array(16000));
+    eq(singing.label, 'singing', '唱歌');
+    eq(fireredAed.aedModeOf('voice'), 'voice', 'mode voice');
+    eq(fireredAed.aedModeOf('nope'), 'off', '未知模式回到 off');
+    eq(fireredAed.aedShouldDeliver('voice', music), false, '纯音乐不投');
+    eq(fireredAed.aedShouldDeliver('voice', { label: 'speech', voice: 0.9 }), true, '有人声照投');
+    eq(fireredAed.aedShouldDeliver('tag', music), true, 'tag 照投');
+  });
+
+  await checkAsync('AED tag：事件正文与记录带类型', async () => {
+    const rig = makeWorld({ aedMode: 'tag' }, {
+      aed: { create: async () => ({ classify: async () => ({ label: 'speech', speech: 0.9, singing: 0.1, music: 0.2, voice: 0.9 }) }) },
+    });
+    await rig.world.start(rig.host);
+    await rig.world.invoke('status', 'start', ['system']);
+    await speakOnce(rig);
+    for (let i = 0; i < 5; i += 1) await flush();
+    eq(rig.events.length, 1, '一个事件');
+    assert(rig.events[0].e.text.includes('说话'), `正文标签：${rig.events[0].e.text}`);
+    eq(rig.events[0].e.meta.aed.label, 'speech', 'meta 标签');
+    const list = await rig.world.invoke('chunks', 'list', [10]);
+    eq(list.items[0].aedLabel, 'speech', '记录标签');
+    await rig.world.stop();
+  });
+
+  await checkAsync('AED voice：纯音乐块只归档、不投事件', async () => {
+    const rig = makeWorld({ aedMode: 'voice' }, {
+      aed: { create: async () => ({ classify: async () => ({ label: 'music', speech: 0.01, singing: 0.02, music: 0.99, voice: 0.02 }) }) },
+    });
+    await rig.world.start(rig.host);
+    await rig.world.invoke('status', 'start', ['system']);
+    await speakOnce(rig);
+    for (let i = 0; i < 5; i += 1) await flush();
+    eq(rig.events.length, 0, `不发事件：${rig.events[0]?.e?.text}`);
+    const list = await rig.world.invoke('chunks', 'list', [10]);
+    eq(list.count, 1, '仍然入库');
+    eq(list.items[0].aedLabel, 'music', '记录标签');
+    eq(list.items[0].delivered, false, '不算送达');
+    const st = await rig.world.invoke('status', 'state');
+    eq(st.archived, 1, '按归档计');
+    eq(st.failedEvents, 0, '不算失败');
+    await rig.world.stop();
   });
 
   // -------------------------------------------------------------------------

@@ -2,6 +2,15 @@
 
 每个版本一节 `## <版本号>`；扩展市场按节显示更新说明。
 
+## 0.5.0
+
+- 新增 FireRed VAD 流式切分（`vad: firered`）：官方 2.3MB ONNX + kaldi 兼容的 80 维 fbank/CMVN 前端，10ms 帧、带 cache 的流式推理，后处理照官方状态机移植；Silero 与能量门限保持不变。
+- 新增可选依赖 `onnxruntime-node`；模型自动下载到 `listen/firered/`（ONNX + cmvn.ark），也可用 `fireredModel` 指本地文件。
+- 切分器支持异步交付（回调），World 按已处理位置修剪音频缓冲，推理落后时不丢段。
+- 实测同一首歌：FireRed 流式 27 段 / 144 秒，前奏 0 误报；AED 三分类逐帧与官方 Python 实现误差 < 1e-4。
+- 新增 `aedMode`（`off` / `tag` / `voice`）：用 FireRed AED 对每个块区分说话/唱歌/音乐；`voice` 下纯音乐块只归档、不发事件。实测前奏（音乐）人声帧 0%、有词段 singing 97.5%、语音样本 speech 74.4%。
+- 自检 52 项通过。
+
 ## 0.4.1
 
 - 修复 Electron 下 Silero 切分必报 `External buffers are not allowed`：取段改用 `front(false)`，复制进普通 ArrayBuffer。

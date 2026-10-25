@@ -18,6 +18,8 @@ import { listApps as listAppsDefault, resolveApp as resolveAppDefault } from './
 import { Capturer, captureModuleStatus } from './capture.js';
 import { Chunks } from './chunks.js';
 import { DEFAULTS, EVENT_TYPE, FRAME_MS, ID, SAMPLE_RATE, configGroup, text } from './config.js';
+import { AED_LABELS, FireRedAedClassifier, aedModeOf, aedShouldDeliver, ensureFireRedAedModel } from './firered-aed.js';
+import { FireRedSegmenter, ensureFireRedModel, fireRedModelState, loadOnnxRuntime } from './firered.js';
 import { SileroSegmenter, ensureSileroModel, ensureSileroRuntime, modelState } from './silero.js';
 import { Segmenter } from './vad.js';
 import { encodeWav, formatKb, formatSeconds } from './wav.js';
@@ -63,6 +65,8 @@ export class ListenWorld {
   #streams = new Set();
   #capture = null;
   #segmenter = null;
+  #aed = null;
+  #aedCreate = null;
   #vadKind = '';
   #sileroPath = '';
   #chunks = null;
@@ -108,6 +112,7 @@ export class ListenWorld {
     this.#listApps = typeof opts.listApps === 'function' ? opts.listApps : listAppsDefault;
     this.#sileroLoad = typeof opts.silero?.loadSherpa === 'function' ? opts.silero.loadSherpa : undefined;
     this.#fetch = typeof opts.silero?.fetchImpl === 'function' ? opts.silero.fetchImpl : undefined;
+    this.#aedCreate = typeof opts.aed?.create === 'function' ? opts.aed.create : null;
   }
 
   #now;
@@ -166,15 +171,21 @@ export class ListenWorld {
     };
   }
 
-  /** `worlds.listen.vad`：energy（默认，零依赖）或 silero（神经网络，需要模型）。 */
+  /** `worlds.listen.vad`：energy（零依赖）、silero 或 firered（神经网络，需要模型）。 */
   #vadKindSetting() {
-    return this.#str('vad') === 'silero' ? 'silero' : 'energy';
+    const value = this.#str('vad');
+    return value === 'silero' || value === 'firered' ? value : 'energy';
   }
 
-  /** silero 的当前参数（热改由切分器自己重建生效）。 */
-  #sileroConfig() {
+  /** 块级三分类的当前模式：off / tag / voice。 */
+  #aedMode() {
+    return aedModeOf(this.#str('aedMode'));
+  }
+
+  /** 神经网络切分器的当前参数（热改由切分器自己重建生效）。 */
+  #neuralConfig(kind = 'silero') {
     return {
-      threshold: this.#num('sileroThreshold', 0.1, 0.9),
+      threshold: this.#num(kind === 'firered' ? 'fireredThreshold' : 'sileroThreshold', 0.1, 0.9),
       minSpeechMs: this.#num('minSpeechMs', 50, 2000),
       silenceMs: this.#num('silenceMs', 150, 5000),
       maxUtteranceMs: this.#num('maxUtteranceMs', 2000, 120000),
@@ -182,8 +193,21 @@ export class ListenWorld {
     };
   }
 
+  /** 模型配置键：sileroModel / fireredModel。 */
+  #modelCfgPath(kind = 'silero') {
+    return this.#str(kind === 'firered' ? 'fireredModel' : 'sileroModel');
+  }
+
   /** 模型的现状（同步看，不下载）。 */
-  #modelState() {
+  #modelState(kind = this.#vadKindSetting()) {
+    if (kind === 'firered') {
+      return fireRedModelState({
+        cfgPath: this.#modelCfgPath('firered'),
+        dataDir: this.dataDir,
+        packageDir: this.packageDir,
+        botDir: this.botDir,
+      });
+    }
     return modelState({
       cfgPath: this.#str('sileroModel'),
       dataDir: this.dataDir,
@@ -335,13 +359,19 @@ export class ListenWorld {
     if (s.listening) lines.push(`开始于：${s.startedAt}${s.autoStopAt ? ` · 自动停止：${s.autoStopAt}` : ''}`);
     lines.push(`计数：${s.chunks} 块语音（送达 ${s.delivered}，归档 ${s.archived}，事件失败 ${s.failedEvents}，限速压掉 ${s.throttled}，碎片 ${s.dropped}）· 收帧 ${s.frames}（${formatSeconds(s.audioMs / 1000)}）。`);
     lines.push(`记录：${s.store.count} 块（${formatKb(s.store.totalBytes)}，重启也在；目录 ${s.store.dir}）。`);
-    if (s.vad.kind === 'silero') {
-      lines.push(`切分：silero（概率门限 ${s.vad.sileroThreshold}）· 起说 ${s.vad.minSpeechMs}ms · 收尾 ${s.vad.silenceMs}ms · 单块上限 ${s.vad.maxUtteranceMs}ms。`);
+    if (s.vad.kind === 'silero' || s.vad.kind === 'firered') {
+      const label = s.vad.kind;
+      const threshold = label === 'firered' ? s.vad.fireredThreshold : s.vad.sileroThreshold;
+      lines.push(`切分：${label}（概率门限 ${threshold}）· 起说 ${s.vad.minSpeechMs}ms · 收尾 ${s.vad.silenceMs}ms · 单块上限 ${s.vad.maxUtteranceMs}ms。`);
       lines.push(s.model.exists
         ? `模型：${s.model.path}（${Math.round(s.model.sizeBytes / 1024)} KB）。`
-        : `模型：还没下载（${s.model.path}）——到控制台「听觉 → 状态」获取，或设置 worlds.listen.sileroModel。`);
+        : `模型：还没下载（${s.model.path}）——到控制台「听觉 → 状态」获取，或设置 worlds.listen.${label === 'firered' ? 'fireredModel' : 'sileroModel'}。`);
     } else {
       lines.push(`切分：energy · 门限 ${s.vad.thresholdDb} dBFS · 起说 ${s.vad.minSpeechMs}ms · 收尾 ${s.vad.silenceMs}ms · 单块上限 ${s.vad.maxUtteranceMs}ms。`);
+    }
+    if (this.#aedMode() !== 'off') {
+      const ready = this.#state.listening && !this.#aed ? ' · 模型不可用' : '';
+      lines.push(`区分：音乐/说话（${this.#aedMode()}${ready}）${this.#aedMode() === 'voice' ? '；纯音乐块只归档' : ''}。`);
     }
     lines.push(`可选目标：source=system 或 source=app（app 填进程名或 PID，例如 chrome.exe）。`);
     lines.push(s.module.ok ? '采集模块：可用（loopback-capture）。' : `采集模块：不可用——${s.module.error}`);
@@ -408,14 +438,62 @@ export class ListenWorld {
         loadSherpa: () => runtime,
         now: this.#now,
         log: this.#host?.log,
-        ...this.#sileroConfig(),
+        ...this.#neuralConfig('silero'),
       });
       this.#sileroPath = model.path;
+    } else if (kind === 'firered') {
+      loadOnnxRuntime();
+      const model = await ensureFireRedModel({
+        cfgPath: this.#modelCfgPath('firered'),
+        dataDir: this.dataDir,
+        packageDir: this.packageDir,
+        botDir: this.botDir,
+        fetchImpl: this.#fetch,
+        timeoutMs: 180000,
+        log: this.#host?.log,
+      });
+      segmenter = await FireRedSegmenter.create({
+        modelPath: model.path,
+        cmvnPath: model.cmvnPath,
+        sampleRate: SAMPLE_RATE,
+        frameMs: FRAME_MS,
+        now: this.#now,
+        log: this.#host?.log,
+        ...this.#neuralConfig('firered'),
+        onUtterance: (u) => this.#queueShip(u),
+        onError: (err) => this.#setError(`切分出错：${msg(err)}`),
+      });
+      this.#sileroPath = '';
     } else {
       segmenter = new Segmenter(this.#vadConfig(), FRAME_MS);
       this.#sileroPath = '';
     }
     this.#vadKind = kind;
+
+    // 块级三分类是可选的：模型缺失/装不上只警告，不让监听失败。
+    this.#aed = null;
+    if (this.#aedMode() !== 'off') {
+      try {
+        if (this.#aedCreate) {
+          this.#aed = await this.#aedCreate();
+        } else {
+          const aedModel = await ensureFireRedAedModel({
+            cfgPath: this.#modelCfgPath('firered'),
+            dataDir: this.dataDir,
+            packageDir: this.packageDir,
+            botDir: this.botDir,
+            fetchImpl: this.#fetch,
+            log: this.#host?.log,
+          });
+          this.#aed = await FireRedAedClassifier.create({
+            modelPath: aedModel.path,
+            cmvnPath: aedModel.cmvnPath,
+          });
+        }
+      } catch (err) {
+        this.#host?.log?.warn?.('听觉：音乐/说话区分不可用', { detail: msg(err) });
+      }
+    }
 
     const capture = this.#createCapture({
       onFrame: (frame) => this.#onFrame(frame),
@@ -466,7 +544,9 @@ export class ListenWorld {
       // 两种切分器的门限单位不同：概率 vs dBFS。
       ...(kind === 'silero'
         ? { sileroThreshold: this.#num('sileroThreshold', 0.1, 0.9) }
-        : { thresholdDb: this.#num('thresholdDb', -80, -10) }),
+        : kind === 'firered'
+          ? { fireredThreshold: this.#num('fireredThreshold', 0.1, 0.9) }
+          : { thresholdDb: this.#num('thresholdDb', -80, -10) }),
     });
     this.#broadcast({ t: 'state', state: this.#snapshot() });
     return this.#snapshot();
@@ -485,12 +565,14 @@ export class ListenWorld {
     if (segmenter) {
       try {
         const tail = segmenter.flush();
-        for (const u of Array.isArray(tail) ? tail : (tail ? [tail] : [])) this.#queueShip(u);
+        const list = tail && typeof tail.then === 'function' ? await tail : tail;
+        for (const u of Array.isArray(list) ? list : (list ? [list] : [])) this.#queueShip(u);
         this.#state.dropped = segmenter.dropped;
       } catch (err) {
         this.#setError(`收尾时切分出错：${msg(err)}`);
       }
     }
+    this.#aed = null;
     if (!this.#state.listening) return this.#snapshot();
     this.#state.listening = false;
     this.#autoStopAt = 0;
@@ -505,9 +587,10 @@ export class ListenWorld {
     const segmenter = this.#segmenter;
     if (!segmenter) return;
     try {
-      segmenter.configure(this.#vadKind === 'silero' ? this.#sileroConfig() : this.#vadConfig());
+      segmenter.configure(this.#vadKind === 'energy' ? this.#vadConfig() : this.#neuralConfig(this.#vadKind));
       this.#state.dropped = segmenter.dropped;
-      for (const u of segmenter.tick(now)) this.#queueShip(u);
+      if (segmenter.async) segmenter.tick(now);
+      else for (const u of segmenter.tick(now)) this.#queueShip(u);
     } catch (err) {
       this.#setError(`切分出错：${msg(err)}`);
       void this.#stopListening('segmenter-error').catch(() => {});
@@ -525,7 +608,8 @@ export class ListenWorld {
     this.#state.audioMs += FRAME_MS;
     const now = this.#now();
     try {
-      for (const u of segmenter.push(frame, now)) this.#queueShip(u);
+      if (segmenter.async) segmenter.push(frame, now);
+      else for (const u of segmenter.push(frame, now)) this.#queueShip(u);
       this.#state.dropped = segmenter.dropped;
     } catch (err) {
       this.#setError(`切分出错：${msg(err)}`);
@@ -564,7 +648,17 @@ export class ListenWorld {
     const now = this.#now();
     const wake = this.#str('wake') === 'record' ? 'record' : 'notify';
     const throttled = wake === 'notify' && this.#rateBlocked(now);
-    const deliver = wake === 'notify' && !throttled;
+    let aed = null;
+    if (this.#aed) {
+      try {
+        aed = await this.#aed.classify(u.pcm);
+      } catch (err) {
+        this.#host?.log?.warn?.('听觉：音乐/说话区分失败', { detail: msg(err) });
+      }
+    }
+    const aedMode = this.#aedMode();
+    const voiceFiltered = !aedShouldDeliver(aedMode, aed);
+    const deliver = wake === 'notify' && !throttled && !voiceFiltered;
 
     const bytes = encodeWav(u.pcm, SAMPLE_RATE);
     const seconds = u.durationMs / 1000;
@@ -572,7 +666,8 @@ export class ListenWorld {
       ? this.#text().targetApp(this.#state.app || `PID ${this.#state.pid}`)
       : this.#text().targetSystem;
     const forced = u.forced ? ' · 说得太长被切开' : '';
-    const body = `听到一段语音：${seconds.toFixed(1)} 秒（${targetLabel}${forced}）`;
+    const aedTag = aed ? ` · ${AED_LABELS[aed.label] ?? aed.label}` : '';
+    const body = `听到一段语音：${seconds.toFixed(1)} 秒（${targetLabel}${forced}${aedTag}）`;
     // Both segmenters return an absolute wall-clock timestamp.
     const startedAt = new Date(u.startAt).toISOString();
     const stamp = new Date(now).toISOString().replace(/[-:]/g, '').replace('T', '-').slice(0, 15);
@@ -582,33 +677,39 @@ export class ListenWorld {
     let eventSaved = false;
     let deliveryError = '';
     try {
-      if (!this.#host?.pushEvent) throw new Error('事件宿主不可用');
-      const envelope = await this.#host.pushEvent({
-        type: EVENT_TYPE,
-        source: this.id,
-        senderKey: this.#senderKey(),
-        ts: at,
-        text: body,
-        meta: {
-          source: this.#state.source,
-          app: this.#state.app,
-          pid: this.#state.pid,
-          durationMs: u.durationMs,
-          startedAt,
-          peakDb: Math.round(u.peakDb * 10) / 10,
-          forced: u.forced,
-          throttled,
-        },
-        blobs: [{
-          bytes,
-          mime: 'audio/wav',
-          name: `listen-${stamp}.wav`,
-          fallbackText: `一段 ${seconds.toFixed(1)} 秒的语音（${targetLabel}）`,
-        }],
-      }, { deliver, trigger: 'debounce' });
-      handle = envelope?.blobs?.[0]?.handle ?? '';
-      eventSaved = true;
-      if (deliver) this.#emitTimes.push(now);
+      if (voiceFiltered) {
+        // 纯音乐块：不投事件、不唤醒，但照常进记录。
+        eventSaved = true;
+      } else {
+        if (!this.#host?.pushEvent) throw new Error('事件宿主不可用');
+        const envelope = await this.#host.pushEvent({
+          type: EVENT_TYPE,
+          source: this.id,
+          senderKey: this.#senderKey(),
+          ts: at,
+          text: body,
+          meta: {
+            source: this.#state.source,
+            app: this.#state.app,
+            pid: this.#state.pid,
+            durationMs: u.durationMs,
+            startedAt,
+            peakDb: Math.round(u.peakDb * 10) / 10,
+            forced: u.forced,
+            throttled,
+            ...(aed ? { aed: { label: aed.label, speech: aed.speech, singing: aed.singing, music: aed.music, voice: aed.voice } } : {}),
+          },
+          blobs: [{
+            bytes,
+            mime: 'audio/wav',
+            name: `listen-${stamp}.wav`,
+            fallbackText: `一段 ${seconds.toFixed(1)} 秒的语音（${targetLabel}${aedTag}）`,
+          }],
+        }, { deliver, trigger: 'debounce' });
+        handle = envelope?.blobs?.[0]?.handle ?? '';
+        eventSaved = true;
+        if (deliver) this.#emitTimes.push(now);
+      }
     } catch (err) {
       deliveryError = msg(err);
       this.#setError(`事件没送出去：${deliveryError}`);
@@ -629,6 +730,7 @@ export class ListenWorld {
         handle,
         forced: u.forced,
         peakDb: Math.round(u.peakDb * 10) / 10,
+        aedLabel: aed?.label ?? '',
         delivered: deliver && eventSaved,
         deliveryError,
       });
@@ -704,10 +806,12 @@ export class ListenWorld {
         totalBytes: this.#chunksFor().totalBytes,
         totalDurationMs: this.#chunksFor().totalDurationMs,
       },
+      aed: { mode: this.#aedMode(), ready: Boolean(this.#aed) },
       vad: {
         kind: this.#state.listening ? this.#vadKind : this.#vadKindSetting(),
         ...this.#vadConfig(),
         sileroThreshold: this.#num('sileroThreshold', 0.1, 0.9),
+        fireredThreshold: this.#num('fireredThreshold', 0.1, 0.9),
       },
       model: this.#modelState(),
       module: captureModuleStatus(),
@@ -773,27 +877,43 @@ export class ListenWorld {
         case 'apps': return { apps: await this.#listApps() };
         case 'model': return { model: this.#modelState() };
         case 'prepareModule': {
-          if (list[0] !== 'silero' && list[0] !== 'energy') throw new Error('未知听觉模块');
+          if (list[0] !== 'silero' && list[0] !== 'firered' && list[0] !== 'energy') throw new Error('未知听觉模块');
           if (this.#state.listening) throw new Error('请先停止监听再切换听觉模块。');
+          const onProgress = (stage) => this.#broadcast({ t: 'module-progress', stage });
           if (list[0] === 'silero') {
-            const onProgress = (stage) => this.#broadcast({ t: 'module-progress', stage });
             await ensureSileroRuntime({ dataDir: this.dataDir, load: this.#sileroLoad, onProgress });
             await ensureSileroModel({ cfgPath: this.#str('sileroModel'), dataDir: this.dataDir,
               packageDir: this.packageDir, botDir: this.botDir, fetchImpl: this.#fetch, log: this.#host?.log, onProgress });
+            onProgress('ready');
+          } else if (list[0] === 'firered') {
+            loadOnnxRuntime();
+            await ensureFireRedModel({ cfgPath: this.#modelCfgPath('firered'), dataDir: this.dataDir,
+              packageDir: this.packageDir, botDir: this.botDir, fetchImpl: this.#fetch, log: this.#host?.log });
             onProgress('ready');
           }
           return { ok: true };
         }
         case 'fetchModel': {
-          const model = await ensureSileroModel({
-            cfgPath: this.#str('sileroModel'),
-            dataDir: this.dataDir,
-            packageDir: this.packageDir,
-            botDir: this.botDir,
-            fetchImpl: this.#fetch,
-            timeoutMs: 300000,
-            log: this.#host?.log,
-          });
+          const kind = this.#vadKindSetting();
+          const model = kind === 'firered'
+            ? await ensureFireRedModel({
+              cfgPath: this.#modelCfgPath('firered'),
+              dataDir: this.dataDir,
+              packageDir: this.packageDir,
+              botDir: this.botDir,
+              fetchImpl: this.#fetch,
+              timeoutMs: this.#num('timeoutMs', 10000, 900000),
+              log: this.#host?.log,
+            })
+            : await ensureSileroModel({
+              cfgPath: this.#str('sileroModel'),
+              dataDir: this.dataDir,
+              packageDir: this.packageDir,
+              botDir: this.botDir,
+              fetchImpl: this.#fetch,
+              timeoutMs: 300000,
+              log: this.#host?.log,
+            });
           return { ok: true, model };
         }
         default: throw new Error(`未知面板方法：status.${method}`);
