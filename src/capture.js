@@ -33,7 +33,7 @@ export function loadCaptureModule() {
   }
 }
 
-/** 原生件能不能载（给状态页与工具回执看），结果缓存。 */
+/** 原生件能不能载（给来源页与工具回执看），结果缓存。 */
 let moduleProbe = null;
 export function captureModuleStatus() {
   if (!moduleProbe) {

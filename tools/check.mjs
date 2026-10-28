@@ -124,22 +124,23 @@ function makeWorld(overrides = {}, opts = {}) {
     blob: (handle) => (opts.blobs?.[handle] ? { bytes: opts.blobs[handle], mime: 'audio/wav' } : null),
     log: { info: () => {}, warn: () => {} },
   };
-  let capture = null;
+  const captures = [];
   const createCapture = ({ onFrame }) => {
-    capture = {
+    const capture = {
       target: null,
       stopped: false,
       start(target) { this.target = target; },
       stop() { this.stopped = true; },
       feed(pcm) { onFrame(pcm); },
     };
+    captures.push(capture);
     return capture;
   };
   const cfg = { ...def.defaults(), aedMode: 'off', enabled: true, ...overrides };
   const world = new ListenWorld({
     cfg,
     dataDir: opts.dataDir ?? join(scratch, 'data', `rig-${rigSeq}`),
-    botDir: join(scratch, 'bot'),
+    botDir: opts.botDir ?? join(scratch, 'bot'),
     packageDir: pkgDir,
     now: clock.now,
     timers: { setInterval: timers.setInterval, clearInterval: timers.clearInterval },
@@ -147,6 +148,7 @@ function makeWorld(overrides = {}, opts = {}) {
     captureStatus: () => ({ ok: true, error: '' }),
     resolveApp: opts.resolveApp ?? (async (target) => ({ pid: 4242, name: String(target), title: '', numeric: false })),
     listApps: opts.listApps ?? (async () => [{ name: 'chrome', pid: 4242, title: 'example' }]),
+    pidAlive: opts.pidAlive ?? (() => true),
     silero: opts.silero,
     aed: opts.aed,
   });
@@ -156,8 +158,9 @@ function makeWorld(overrides = {}, opts = {}) {
     events,
     clock,
     timers,
-    capture: () => capture,
-    feedFrames: (db, count, advance = true) => {
+    capture: () => captures.at(-1),
+    captures: () => captures,
+    feedFrames: (db, count, advance = true, capture = captures.at(-1)) => {
       for (let i = 0; i < count; i += 1) {
         const f = frame(db);
         if (advance) clock.advance(20);
@@ -222,10 +225,10 @@ const toolOf = (world, name) => {
 };
 
 /** 起一段语音再收尾：开口 10 帧，停顿 30 帧；返回喂完之后的时钟。 */
-async function speakOnce(rig, { loudDb = -20, quietDb = -60, speechFrames = 24 } = {}) {
-  rig.feedFrames(quietDb, 16); // preRoll 背景
-  rig.feedFrames(loudDb, speechFrames); // 开口
-  rig.feedFrames(quietDb, 30); // 收尾静音（600ms）
+async function speakOnce(rig, { loudDb = -20, quietDb = -60, speechFrames = 24 } = {}, capture = rig.capture()) {
+  rig.feedFrames(quietDb, 16, true, capture); // preRoll 背景
+  rig.feedFrames(loudDb, speechFrames, true, capture); // 开口
+  rig.feedFrames(quietDb, 30, true, capture); // 收尾静音（600ms）
 }
 
 try {
@@ -438,6 +441,46 @@ try {
     try { apps.buildAppList([], 'unavailable'); } catch { failed = true; }
     eq(failed, true, '查询失败报错而非列出所有进程');
     eq(apps.buildAppList([{ name: '', pid: 0 }]).length, 0, '过滤无效进程');
+  });
+
+  check('窗口标题：隐藏窗口里的歌名、噪声过滤与根进程优先', () => {
+    const listed = apps.buildAppList([
+      { name: 'player', pid: 10, parent: 1, audio: true },
+      { name: 'player', pid: 11, parent: 10 },
+    ], '', [
+      { pid: 10, visible: false, cls: 'IME', title: 'Default IME' },
+      { pid: 10, visible: false, cls: 'MSCTFIME UI', title: 'MSCTFIME UI' },
+      { pid: 10, visible: false, cls: 'GDI+ Hook Window Class', title: 'GDI+ Window (player.exe)' },
+      { pid: 10, visible: false, cls: 'MediaPlayer SMTC window - {x}', title: 'MediaPlayer SMTC window - {x}' },
+      { pid: 10, visible: false, cls: 'OrpheusBrowserHost', title: 'Long Kiss Good Bye - HALCALI' },
+      { pid: 10, visible: false, cls: 'MiniPlayer', title: '迷你播放器' },
+      { pid: 11, visible: false, cls: 'icon', title: 'Long Kiss Good Bye - HALCALI' },
+    ]);
+    eq(listed[0].title, 'Long Kiss Good Bye - HALCALI', '隐藏窗口里的播放器标题');
+
+    const editor = apps.buildAppList([
+      { name: 'editor', pid: 20, parent: 1, audio: true },
+    ], '', [
+      { pid: 20, visible: false, cls: 'Hidden', title: 'Song - Hidden' },
+      { pid: 20, visible: true, cls: 'Main', title: 'Editor' },
+    ]);
+    eq(editor[0].title, 'Editor', '可见窗口优先于隐藏');
+
+    const rootWins = apps.buildAppList([
+      { name: 'app', pid: 30, parent: 1, audio: true },
+      { name: 'app', pid: 31, parent: 30 },
+    ], '', [
+      { pid: 30, visible: true, cls: 'Main', title: 'App' },
+      { pid: 31, visible: true, cls: 'Pet', title: 'Pet window' },
+    ]);
+    eq(rootWins[0].title, 'App', '根进程的窗口优先');
+
+    eq(apps.chooseTitle([{ title: 'Default IME', cls: 'IME', visible: true }]), '', '只有噪声时给空');
+    eq(apps.chooseTitle([
+      { title: 'Song A', cls: 'X', visible: false },
+      { title: 'Song A', cls: 'Y', visible: false },
+      { title: '迷你播放器', cls: 'Z', visible: false },
+    ]), 'Song A', '重复标题优先');
   });
 
   check('chooseRoot：优先没有同名父进程的根，再优先有窗口标题', () => {
@@ -845,7 +888,7 @@ try {
       aed: { create: async () => ({ classify: async () => ({ label: 'speech', speech: 0.9, singing: 0.1, music: 0.2, voice: 0.9 }) }) },
     });
     await rig.world.start(rig.host);
-    await rig.world.invoke('status', 'start', ['system']);
+    await rig.world.invoke('status', 'start', [[{ source: 'system' }]]);
     await speakOnce(rig);
     for (let i = 0; i < 5; i += 1) await flush();
     eq(rig.events.length, 1, '一个事件');
@@ -861,7 +904,7 @@ try {
       aed: { create: async () => ({ classify: async () => ({ label: 'music', speech: 0.01, singing: 0.02, music: 0.99, voice: 0.02 }) }) },
     });
     await rig.world.start(rig.host);
-    await rig.world.invoke('status', 'start', ['system']);
+    await rig.world.invoke('status', 'start', [[{ source: 'system' }]]);
     await speakOnce(rig);
     for (let i = 0; i < 5; i += 1) await flush();
     eq(rig.events.length, 0, `不发事件：${rig.events[0]?.e?.text}`);
@@ -927,6 +970,8 @@ try {
   check('环境模板默认空白，可编辑且不注入动态状态', () => {
     const world = def.create({ cfg: def.defaults(), dataDir: scratch, botDir: scratch });
     const doc = world.webUi('zh').promptDocs[0];
+    eq(doc.title, '提示词', '提示页标题');
+    eq(world.webUi('en').promptDocs[0].title, 'Prompt', '提示页英文标题');
     eq(readFileSync(doc.path, 'utf8'), '', '默认模板完全为空');
     eq(doc.description, undefined, '不显示板块描述');
     eq(stable(world.envPromptVars()), '{}', '无动态状态变量');
@@ -949,9 +994,41 @@ try {
     eq(recent.parameters.required?.[0], 'action', 'read required');
     const decl = world.webUi('zh');
     const ids = decl.panels.map((p) => p.id);
-    assert(ids.includes('chunks') && ids.includes('status'), `面板缺：${ids.join(',')}`);
+    assert(ids.includes('chunks') && ids.includes('status') && ids.includes('tools'), `面板缺：${ids.join(',')}`);
     assert(decl.config?.length === 1, '缺配置组');
     eq(decl.promptDocs[0].role, 'envPrompt', '保留模板编辑入口');
+  });
+
+  await checkAsync('工具页：读取声明、保存覆盖、下次会话沿用、恢复默认', async () => {
+    const botDir = join(scratch, 'tools-bot');
+    const rig = makeWorld({}, { botDir });
+    const panel = rig.world.webUi('zh').panels.find((item) => item.id === 'tools');
+    assert(panel && panel.title === '工具', `缺工具页：${JSON.stringify(rig.world.webUi('zh').panels)}`);
+    const first = await rig.world.invoke('tools', 'list', []);
+    eq(first.tools.length, 2, '两个工具');
+    eq(first.tools[0].name, 'listen_act', '第一个工具');
+    const description = first.tools[0].fields.find((field) => field.path === '/description');
+    const defaultDescription = def.describe.tools.find((tool) => tool.name === 'listen_act').description;
+    eq(description.inheritedText, defaultDescription, '默认文字来自声明');
+    eq(description.text, defaultDescription, '初始文字');
+    eq(description.source, 'default', '默认来源');
+    const saved = await rig.world.invoke('tools', 'save', [{
+      expectedRevision: first.revision,
+      overrides: { listen_act: { '/description': '改过的说明' } },
+    }]);
+    const savedField = saved.tools[0].fields.find((field) => field.path === '/description');
+    eq(savedField.text, '改过的说明', '保存后显示覆盖');
+    eq(savedField.source, 'deployment', '来源是部署覆盖');
+    eq(rig.world.tools()[0].description, '改过的说明', '工具表使用覆盖');
+
+    const next = makeWorld({}, { botDir });
+    eq(next.world.tools()[0].description, '改过的说明', '下次会话沿用');
+    const restored = await next.world.invoke('tools', 'reset', [{ expectedRevision: saved.revision }]);
+    eq(restored.tools[0].fields.find((field) => field.path === '/description').text, defaultDescription, '恢复默认文字');
+    eq(next.world.tools()[0].description, defaultDescription, '工具表回到默认');
+    eq(restored.tools[0].fields.find((field) => field.path === '/description').source, 'default', '来源回到默认');
+    await rig.world.stop();
+    await next.world.stop();
   });
 
   await checkAsync('listen_read source_list：列出音频应用、空列表和查询失败，不启动采集', async () => {
@@ -988,7 +1065,7 @@ try {
     const rig = makeWorld();
     const { world } = rig;
     await world.start(rig.host);
-    const start = await toolOf(world, 'listen_act').handler({ action: 'start' }, {});
+    const start = await toolOf(world, 'listen_act').handler({ action: 'start', source: 'system' }, {});
     assert(!start.failed, `开始失败：${start.text}`);
     assert(start.text.includes('听觉打开了'), '开始回执');
     eq(rig.capture().target.source, 'system', '采集目标');
@@ -1041,7 +1118,7 @@ try {
     );
     const { world } = rig;
     await world.start(rig.host);
-    const start = await toolOf(world, 'listen_act').handler({ action: 'start' }, {});
+    const start = await toolOf(world, 'listen_act').handler({ action: 'start', source: 'system' }, {});
     assert(!start.failed, `开始失败：${start.text}`);
     eq(rig.capture().target.source, 'system', '采集目标');
     rig.feedFrames(-20, 12); // 第 5 帧时假 sherpa 排一段 400ms
@@ -1063,7 +1140,7 @@ try {
     const fetched = await world.invoke('status', 'fetchModel', []);
     eq(fetched.model.path, modelFile, 'fetchModel 在已有配置路径上直接返回');
     const status = await toolOf(world, 'listen_read').handler({ action: 'status' }, {});
-    assert(status.text.includes('切分：silero'), `状态回执：${status.text}`);
+    assert(status.text.includes('系统声音=silero'), `状态回执：${status.text}`);
     await world.stop();
   });
 
@@ -1072,7 +1149,7 @@ try {
     const push = rig.host.pushEvent;
     rig.host.pushEvent = async () => { throw new Error('store unavailable'); };
     await rig.world.start(rig.host);
-    await rig.world.invoke('status', 'start', ['system']);
+    await rig.world.invoke('status', 'start', [[{ source: 'system' }]]);
     await speakOnce(rig);
     await flush();
     const failed = await rig.world.invoke('chunks', 'list', [10]);
@@ -1098,7 +1175,7 @@ try {
     const rig = makeWorld({ wake: 'record' });
     rig.host.pushEvent = async () => { throw new Error('disk full'); };
     await rig.world.start(rig.host);
-    await rig.world.invoke('status', 'start', ['system']);
+    await rig.world.invoke('status', 'start', [[{ source: 'system' }]]);
     await speakOnce(rig);
     await flush();
     const state = await rig.world.invoke('status', 'state');
@@ -1111,7 +1188,7 @@ try {
     const rig = makeWorld({ wake: 'record' });
     const { world } = rig;
     await world.start(rig.host);
-    await toolOf(world, 'listen_act').handler({ action: 'start' }, {});
+    await toolOf(world, 'listen_act').handler({ action: 'start', source: 'system' }, {});
     await speakOnce(rig);
     await toolOf(world, 'listen_act').handler({ action: 'stop' }, {});
     eq(rig.events.length, 1, '一个事件');
@@ -1126,7 +1203,7 @@ try {
     const rig = makeWorld({ maxEventsPerMinute: 1 });
     const { world } = rig;
     await world.start(rig.host);
-    await toolOf(world, 'listen_act').handler({ action: 'start' }, {});
+    await toolOf(world, 'listen_act').handler({ action: 'start', source: 'system' }, {});
     await speakOnce(rig);
     await speakOnce(rig);
     await toolOf(world, 'listen_act').handler({ action: 'stop' }, {});
@@ -1143,11 +1220,11 @@ try {
     const rig = makeWorld({ control: 'console' });
     const { world } = rig;
     await world.start(rig.host);
-    const refused = await toolOf(world, 'listen_act').handler({ action: 'start' }, {});
+    const refused = await toolOf(world, 'listen_act').handler({ action: 'start', source: 'system' }, {});
     assert(refused.failed, '应当被拒');
     assert(refused.text.includes('只允许使用者从控制台'), `拒绝文案：${refused.text}`);
     // 控制台能开
-    const s = await world.invoke('status', 'start', ['system', '']);
+    const s = await world.invoke('status', 'start', [[{ source: 'system' }]]);
     eq(s.ok, true, '控制台开始');
     eq(s.state.listening, true, '在听');
     const stopped = await toolOf(world, 'listen_act').handler({ action: 'stop' }, {});
@@ -1159,7 +1236,7 @@ try {
     const rig = makeWorld({ source: 'app', app: 'chrome' });
     const { world } = rig;
     await world.start(rig.host);
-    const start = await toolOf(world, 'listen_act').handler({ action: 'start', source: 'app', app: 'chrome' }, {});
+    const start = await toolOf(world, 'listen_act').handler({ action: 'start', source: 'apps', apps: ['chrome'] }, {});
     assert(!start.failed, `开始失败：${start.text}`);
     assert(start.text.includes('应用 chrome'), `目标文案：${start.text}`);
     eq(rig.capture().target.pid, 4242, 'PID 来自解析');
@@ -1170,11 +1247,152 @@ try {
     await world.stop();
   });
 
+  await checkAsync('工具：apps 数组一次开多路', async () => {
+    const rig = makeWorld({}, {
+      resolveApp: async (target) => ({ pid: target === 'alpha' ? 11 : 22, name: `${target}.exe`, title: '', numeric: false }),
+    });
+    const { world } = rig;
+    await world.start(rig.host);
+    const start = await toolOf(world, 'listen_act').handler({ action: 'start', source: 'apps', apps: ['alpha', 'beta'] }, {});
+    assert(!start.failed, `开始失败：${start.text}`);
+    assert(start.text.includes('同时听 2 路'), `回执说明多路：${start.text}`);
+    eq(rig.captures().length, 2, '两路采集');
+    eq(rig.captures().map((cap) => cap.target.pid).sort((a, b) => a - b).join(','), '11,22', '各自的目标 PID');
+    await world.stop();
+  });
+
+  await checkAsync('多应用：每路独立切分，事件按来源标注', async () => {
+    const fakeSherpa = makeFakeSherpa();
+    const modelFile = join(scratch, 'multi-silero.onnx');
+    writeFileSync(modelFile, Buffer.alloc(2000));
+    const rig = makeWorld({ sileroModel: modelFile, minUtteranceMs: 100, minSpeechMs: 200 }, {
+      silero: { loadSherpa: () => fakeSherpa.module },
+      resolveApp: async (target) => ({ pid: target === 'alpha' ? 11 : 22, name: `${target}.exe`, title: '', numeric: false }),
+    });
+    const { world } = rig;
+    await world.start(rig.host);
+    const started = await world.invoke('status', 'start', [[
+      { source: 'app', app: 'alpha', vad: 'energy' },
+      { source: 'app', app: 'beta', vad: 'silero' },
+    ]]);
+    eq(started.state.sources.length, 2, '两路来源');
+    eq(started.state.sources.map((src) => `${src.app}=${src.vad}`).sort().join(','), 'alpha=energy,beta=silero', '各自的切分方式');
+    eq(world.webUi('zh').badges[0].value, '2 路', '多路徽标显示数量');
+    const alpha = rig.captures().find((cap) => cap.target.source === 'app' && cap.target.pid === 11);
+    const beta = rig.captures().find((cap) => cap.target.source === 'app' && cap.target.pid === 22);
+    assert(alpha && beta, '两路各有自己的采集');
+    await speakOnce(rig, {}, alpha);
+    rig.feedFrames(-20, 12, true, beta);
+    const stopped = await world.invoke('status', 'stop');
+    const alphaEvents = rig.events.map(({ e }) => e).filter((e) => e.senderKey === 'listen:app:alpha');
+    const betaEvents = rig.events.map(({ e }) => e).filter((e) => e.senderKey === 'listen:app:beta');
+    eq(alphaEvents.length, 1, `alpha 一块：${alphaEvents.length}`);
+    eq(betaEvents.length, 2, `beta 两块：${betaEvents.length}`);
+    assert(alphaEvents[0].text.includes('应用 alpha'), `alpha 正文：${alphaEvents[0].text}`);
+    assert(betaEvents[0].text.includes('应用 beta'), `beta 正文：${betaEvents[0].text}`);
+    eq(alphaEvents[0].meta.pid, 11, 'alpha 的 PID');
+    eq(betaEvents[0].meta.pid, 22, 'beta 的 PID');
+    eq(stopped.state.sources.find((src) => src.app === 'alpha').chunks, 1, 'alpha 计数');
+    eq(stopped.state.sources.find((src) => src.app === 'beta').chunks, 2, 'beta 计数');
+    eq(stopped.state.chunks, 3, '合计计数');
+    await world.stop();
+  });
+
+  await checkAsync('进程退出：停掉那一路，剩下的继续，全部退出就结束', async () => {
+    const alive = new Set([11, 22]);
+    const rig = makeWorld({}, {
+      resolveApp: async (target) => ({ pid: target === 'alpha' ? 11 : 22, name: `${target}.exe`, title: '', numeric: false }),
+      pidAlive: (pid) => alive.has(pid),
+    });
+    const { world } = rig;
+    await world.start(rig.host);
+    const started = await world.invoke('status', 'start', [[
+      { source: 'app', app: 'alpha', vad: 'energy' },
+      { source: 'app', app: 'beta', vad: 'energy' },
+    ]]);
+    eq(started.state.sources.length, 2, '两路');
+    const alpha = rig.captures().find((cap) => cap.target.pid === 11);
+    const beta = rig.captures().find((cap) => cap.target.pid === 22);
+    await speakOnce(rig, {}, alpha);
+    alive.delete(11);
+    rig.clock.advance(2100);
+    rig.timers.run();
+    for (let i = 0; i < 6; i += 1) await flush();
+    const afterOne = await world.invoke('status', 'state');
+    eq(afterOne.listening, true, '还剩一路');
+    eq(afterOne.sources.length, 1, '只剩 beta');
+    eq(afterOne.sources[0].pid, 22, '留下的是 beta');
+    eq(alpha.stopped, true, '退出那一路的采集已停');
+    eq(afterOne.chunks, 1, '退出那一路的块并入合计');
+    eq(rig.events.filter(({ e }) => e.senderKey === 'listen:app:alpha').length, 1, '退出前的块仍送达');
+
+    alive.delete(22);
+    rig.clock.advance(2100);
+    rig.timers.run();
+    for (let i = 0; i < 6; i += 1) await flush();
+    const afterAll = await world.invoke('status', 'state');
+    eq(afterAll.listening, false, '全部退出后结束本轮');
+    eq(afterAll.chunks, 1, '合计保留');
+    eq(beta.stopped, true, 'beta 采集也停了');
+    await world.stop();
+  });
+
+  await checkAsync('系统声音与应用互斥：一起给时报错且不启动', async () => {
+    const rig = makeWorld({}, {
+      resolveApp: async () => ({ pid: 11, name: 'alpha.exe', title: '', numeric: false }),
+    });
+    await rig.world.start(rig.host);
+    let error = null;
+    try {
+      await rig.world.invoke('status', 'start', [[{ source: 'system' }, { source: 'app', app: 'alpha', vad: 'energy' }]]);
+    } catch (err) {
+      error = err;
+    }
+    assert(error && error.message.includes('不能一起选'), `错误：${error?.message}`);
+    eq((await rig.world.invoke('status', 'state')).listening, false, '没有启动');
+    await rig.world.stop();
+  });
+
+  await checkAsync('配置：apps 逗号分隔与 =vad，旧 app 键仍生效', async () => {
+    const fakeSherpa = makeFakeSherpa();
+    const modelFile = join(scratch, 'cfg-silero.onnx');
+    writeFileSync(modelFile, Buffer.alloc(2000));
+    const resolveApp = async (target) => ({ pid: target === 'alpha' ? 11 : 22, name: `${target}.exe`, title: '', numeric: false });
+    const rig = makeWorld({ source: 'apps', apps: 'alpha=silero, beta', sileroModel: modelFile, minUtteranceMs: 100, minSpeechMs: 200 }, {
+      silero: { loadSherpa: () => fakeSherpa.module },
+      resolveApp,
+    });
+    await rig.world.start(rig.host);
+    const st = await rig.world.invoke('status', 'state');
+    eq(st.selection.apps.map((a) => `${a.app}=${a.vad}`).join(','), 'alpha=silero,beta=energy', '选择来自 apps');
+    const noTarget = await toolOf(rig.world, 'listen_act').handler({ action: 'start' }, {});
+    assert(noTarget.failed && noTarget.text.includes('source'), `不带目标不许开始：${noTarget.text}`);
+    const noApps = await toolOf(rig.world, 'listen_act').handler({ action: 'start', source: 'apps' }, {});
+    assert(noApps.failed && noApps.text.includes('apps'), `source=apps 需要应用：${noApps.text}`);
+    const start = await toolOf(rig.world, 'listen_act').handler({ action: 'start', source: 'apps', apps: ['alpha', 'beta'] }, {});
+    assert(!start.failed, `开始失败：${start.text}`);
+    eq(rig.captures().length, 2, '显式给两路');
+    eq((await rig.world.invoke('status', 'state')).sources.map((src) => `${src.app}=${src.vad}`).sort().join(','), 'alpha=silero,beta=energy', '切分方式沿用配置');
+    await rig.world.invoke('status', 'stop');
+    await rig.world.stop();
+
+    const legacy = makeWorld({ source: 'app', app: 'alpha' }, { resolveApp });
+    await legacy.world.start(legacy.host);
+    const legacyState = await legacy.world.invoke('status', 'state');
+    eq(legacyState.selection.apps.length, 1, '旧 app 键仍算一个应用');
+    eq(legacyState.selection.apps[0].app, 'alpha', '旧 app 名称');
+    const legacyStart = await toolOf(legacy.world, 'listen_act').handler({ action: 'start', source: 'apps', apps: ['alpha'] }, {});
+    assert(!legacyStart.failed, `旧配置开始失败：${legacyStart.text}`);
+    eq((await legacy.world.invoke('status', 'state')).sources[0].vad, 'energy', '旧配置没有单独 VAD，用默认');
+    await legacy.world.invoke('status', 'stop');
+    await legacy.world.stop();
+  });
+
   await checkAsync('自动停止：到点自己关', async () => {
     const rig = makeWorld({ autoStopMinutes: 1 });
     const { world } = rig;
     await world.start(rig.host);
-    await toolOf(world, 'listen_act').handler({ action: 'start' }, {});
+    await toolOf(world, 'listen_act').handler({ action: 'start', source: 'system' }, {});
     eq(world.webUi('zh').badges[0].value, 'energy', '在听时显示实际模块');
     rig.clock.advance(61_000);
     rig.timers.run();
@@ -1188,7 +1406,7 @@ try {
     const rig = makeWorld();
     const { world } = rig;
     await world.start(rig.host);
-    await toolOf(world, 'listen_act').handler({ action: 'start' }, {});
+    await toolOf(world, 'listen_act').handler({ action: 'start', source: 'system' }, {});
     await speakOnce(rig);
     await toolOf(world, 'listen_act').handler({ action: 'stop' }, {});
     const list = await world.invoke('chunks', 'list', [10]);
@@ -1209,7 +1427,7 @@ try {
     const dataDir = join(scratch, 'persist-data');
     const rig1 = makeWorld({}, { dataDir });
     await rig1.world.start(rig1.host);
-    await toolOf(rig1.world, 'listen_act').handler({ action: 'start' }, {});
+    await toolOf(rig1.world, 'listen_act').handler({ action: 'start', source: 'system' }, {});
     await speakOnce(rig1);
     await toolOf(rig1.world, 'listen_act').handler({ action: 'stop' }, {});
     eq(rig1.events.length, 1, '第一程一块');
@@ -1220,7 +1438,7 @@ try {
     await rig2.world.start(rig2.host);
     const recent = await toolOf(rig2.world, 'listen_read').handler({ action: 'recent', limit: 5 }, {});
     assert(recent.text.includes('#1'), `旧块还在：${recent.text}`);
-    await toolOf(rig2.world, 'listen_act').handler({ action: 'start' }, {});
+    await toolOf(rig2.world, 'listen_act').handler({ action: 'start', source: 'system' }, {});
     await speakOnce(rig2);
     await toolOf(rig2.world, 'listen_act').handler({ action: 'stop' }, {});
     const list = await rig2.world.invoke('chunks', 'list', [10]);
@@ -1270,7 +1488,7 @@ try {
     eq((await rig.world.invoke('status', 'state')).vad.kind, 'energy', '准备不擅自修改配置');
     rig.world.cfg.vad = 'silero'; // 模拟 ctx.setConfig 保存后的配置
     eq((await rig.world.invoke('status', 'state')).vad.kind, 'silero', '空闲状态跟随配置页');
-    await rig.world.invoke('status', 'start', ['system']);
+    await rig.world.invoke('status', 'start', [[{ source: 'system' }]]);
     let blocked = false;
     try { await rig.world.invoke('status', 'prepareModule', ['energy']); } catch { blocked = true; }
     assert(blocked, '监听中禁止切换');
@@ -1303,6 +1521,7 @@ try {
     const panels = bundle.default?.panels ?? {};
     assert(typeof panels.chunks?.mount === 'function', '缺 chunks.mount');
     assert(typeof panels.status?.mount === 'function', '缺 status.mount');
+    assert(typeof panels.tools?.mount === 'function', '缺 tools.mount');
   });
 } catch (err) {
   bad(`未捕获的异常：${err instanceof Error ? (err.stack ?? err.message) : String(err)}`);

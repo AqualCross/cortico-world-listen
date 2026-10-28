@@ -8,26 +8,14 @@ import { fileURLToPath } from 'node:url';
 import { DEFAULTS, EVENT_TYPE, ID, LABEL } from './config.js';
 import { LISTEN_TOOL_DECLS, ListenWorld } from './world.js';
 
-/** 自描述里每个工具配一句给人看的话，按工具名。 */
-const TOOL_SUMMARIES = {
-  listen_act: {
-    zh: '打开或关掉听觉：开始/停止监听系统声音或某个应用的音频。',
-    en: 'Turn hearing on or off: start/stop listening to system audio or one application.',
-  },
-  listen_read: {
-    zh: '查询听觉：音频会话应用列表、监听状态或最近语音块。',
-    en: 'Read Hearing information: applications with audio sessions, listening status or recent speech chunks.',
-  },
-};
-
 /** 与框架 `describeTools()` 相同的拼法：取发给模型的字段，再加一句 summary。 */
 function describeTools(decls) {
-  return decls.map(({ name, description, parameters, tags }) => ({
+  return decls.map(({ name, description, parameters, tags, summary }) => ({
     name,
     description,
     parameters,
     tags,
-    summary: TOOL_SUMMARIES[name],
+    summary,
   }));
 }
 

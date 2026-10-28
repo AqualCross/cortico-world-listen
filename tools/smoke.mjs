@@ -34,7 +34,7 @@ function argOf(name, fallback = '') {
 
 const seconds = Math.max(1, Number(argOf('seconds', '8')) || 8);
 const source = argOf('source', DEFAULTS.source) === 'app' ? 'app' : 'system';
-const app = argOf('app', DEFAULTS.app);
+const app = argOf('app', '');
 const out = argOf('out', '');
 const playArg = process.argv.includes('--play') ? argOf('play', 'auto') : '';
 

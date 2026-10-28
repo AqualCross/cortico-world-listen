@@ -1,6 +1,6 @@
 # 听觉 · cortico-world-listen
 
-给 Coopanion 桌宠加一对耳朵：**监听系统声音，或只听某个应用（比如浏览器）的音频**，本地把语音一段段切出来，每块作为 `listen.chunk` 事件投进 cortico 事件流——正文说明时长与来源，附件是一段 16 kHz 单声道 WAV。接下来怎么用（比如把附件句柄交给 `stt_transcribe` 转写成文字）由 agent 决定。
+给 Coopanion 桌宠加一对耳朵：**监听系统声音，或同时听几个应用（比如浏览器与播放器）的音频**，本地把语音一段段切出来，每块作为 `listen.chunk` 事件投进 cortico 事件流——正文说明时长与来源，附件是一段 16 kHz 单声道 WAV。每一路来源有自己的采集与切分器，切分方式可以各不相同。接下来怎么用（比如把附件句柄交给 `stt_transcribe` 转写成文字）由 agent 决定。
 
 这是一个 `cortico` 的 **World 扩展**（`kind: world`，`api: 6`），只补一个 `listen` 世界。采集走 `loopback-capture`（Windows WASAPI 的系统环回 / 进程树 loopback），切分可用包内的**能量门限**（默认，零依赖）、**Silero VAD** 或 **FireRed VAD**（`worlds.listen.vad: silero / firered`，人声/音乐分得开）。
 
@@ -9,23 +9,23 @@
 
 ## 它做了什么
 
-「状态 → 应用 → 刷新应用列表」仅列出有 Windows 音频会话的应用（包括暂时未播放的会话），不会混入其他运行中的应用。音频会话不代表当前正在发声；查询失败时会明确报错。尚未建立音频会话的软件可以手动填写进程名或 PID 提前监听。选择项使用具体 PID，同名子进程合并到其根进程，不同独立实例分别保留；应用重启后需刷新重新选择。刷新列表不会覆盖手动填写或已选的目标。
+「来源」页把系统声音和每个应用列成一行，每行一个勾选框和一个切分方式下拉；勾选即开始监听，取消勾选即停止，全部取消就停，打开页面时默认全不选。系统声音与应用互斥（勾系统会取消应用，勾应用会取消系统），应用可以多选。打开页面时查一次有 Windows 音频会话的应用（包括暂时未播放的会话），只列出这些、不会混入其他运行中的应用；音频会话不代表当前正在发声，查询失败时会明确报错。尚未建立音频会话的软件可以手动填写进程名或 PID 提前加入。行的标题取该应用任一窗口的标题（含隐藏的托盘、迷你播放器窗口），所以后台播放的播放器也能看到当前歌名；IME、GDI+、SMTC 这类系统窗口会被过滤。应用选择项使用具体 PID，同名子进程合并到其根进程，不同独立实例分别保留；按 PID 启动时会先查一次当前进程名，事件与记录里写应用名，PID 已退出则报错让你刷新。应用重启后重新打开这一页再选。选择即时写进配置（`source`、`apps`、`vad`）；桌宠调用 `listen_act` 时必须明确给来源，配置只用来提供每个应用上次选的切分方式。
 
 装好并启用之后，桌宠会多出两个工具：
 
 | 工具 | 标签 | 作用 |
 | --- | --- | --- |
-| `listen_act` | `act` | `action: start / stop`；启动时可选 `source`（system / app）、`app`（进程名或 PID 字符串）、`minutes`（自动停止） |
+| `listen_act` | `act` | `action: start / stop`；启动时必须说明来源：`source: system`，或 `source: apps` + `apps`（一个或多个进程名或 PID）；可选 `vad`、`minutes`（自动停止） |
 | `listen_read` | `read` | `action: source_list / status / recent`；分别查询音频会话应用、监听状态、最近语音块；`limit` 仅用于 recent |
 
-先调用 `listen_read {"action":"source_list"}` 获取目标 PID，再调用 `listen_act {"action":"start","source":"app","app":"30064"}` 开始监听。查看语音块用 `listen_read {"action":"recent","limit":5}`，停止用 `listen_act {"action":"stop"}`。两个工具都必须传入 action；只读入口不会启动或停止采集。
+先调用 `listen_read {"action":"source_list"}` 获取目标 PID，再调用 `listen_act {"action":"start","source":"apps","apps":["30064","msedge.exe"]}` 同时听它们。查看语音块用 `listen_read {"action":"recent","limit":5}`，停止用 `listen_act {"action":"stop"}`。两个工具都必须传入 action；只读入口不会启动或停止采集。
 
-听着的每一块语音变成一个事件：
+听着的每一块语音变成一个事件，正文与 meta 里的来源是它自己那一路：
 
 ```
 type: listen.chunk
-text: 听到一段语音：3.4 秒（系统声音）
-meta: { source, app, pid, durationMs, startedAt, peakDb, forced, seq, throttled }
+text: 听到一段语音：3.4 秒（应用 Chrome）
+meta: { source, app, pid, durationMs, startedAt, peakDb, forced, throttled }
 blobs: [{ mime: audio/wav, name: listen-<时间>.wav, bytes: 16kHz 单声道 WAV }]
 ```
 
@@ -98,8 +98,22 @@ pnpm install      # 或 npm install；原生件都是预编译的，不需要编
   "worlds": {
     "listen": {
       "enabled": true,
-      "source": "app",
-      "app": "msedge.exe"
+      "source": "apps",
+      "apps": "msedge.exe"
+    }
+  }
+}
+```
+
+同时听两个应用、并给其中一路换切分方式：
+
+```json
+{
+  "worlds": {
+    "listen": {
+      "enabled": true,
+      "source": "apps",
+      "apps": "msedge.exe=silero, 30064"
     }
   }
 }
@@ -109,17 +123,17 @@ pnpm install      # 或 npm install；原生件都是预编译的，不需要编
 
 ## 配置
 
-都在 `worlds.listen` 段，控制台「听觉 → 状态」里改了就地生效，不用重启：
+都在 `worlds.listen` 段，控制台「听觉 → 来源」里改了不用重启应用；正在听的这一轮不换目标，下次开始监听生效：
 
 | 键 | 默认 | 说明 |
 | --- | --- | --- |
 | `enabled` | `false` | 是否把 `listen_*` 挂给桌宠 |
-| `source` | `system` | `system` = 整个系统的输出（WASAPI 环回）；`app` = 某个应用 |
-| `app` | 空 | `source: app` 时用：进程名（如 `chrome.exe`）或 PID |
-| `control` | `console-and-agent` | 谁能开听：`console-and-agent` 或 `console`（只许使用者从控制台开；桌宠仍可停）。挂载不会自动开听，要用控制台按钮或桌宠调用 `listen_act` |
+| `source` | `system` | `system` = 整个系统的输出（WASAPI 环回）；`apps` = 一个或多个应用。系统声音已经包含所有应用，两者不并用 |
+| `apps` | 空 | `source: apps` 时用：逗号分隔的进程名（如 `chrome.exe`）或 PID；可写 `name=silero` / `name=firered` / `name=energy` 单独指定那一路的切分方式 |
+| `control` | `console-and-agent` | 谁能开听：`console-and-agent` 或 `console`（只许使用者从控制台勾选；桌宠仍可停）。挂载不会自动开听，要勾选来源或让桌宠调用 `listen_act` |
 | `wake` | `notify` | `notify` = 即时投递；`record` = 只归档不唤醒 |
 | `autoStopMinutes` | `15` | 打开后过多少分钟自动停；`0` = 不自动停 |
-| `vad` | `energy` | 切分方式：`energy`（能量门限，零依赖）、`silero`（Silero VAD）或 `firered`（FireRed VAD，流式 ONNX）；切换在下次开始监听时生效 |
+| `vad` | `energy` | 默认切分方式：`energy`（能量门限，零依赖）、`silero`（Silero VAD）或 `firered`（FireRed VAD，流式 ONNX）。没有在 `apps` 里单独指定、以及系统声音这一路都用它；切换在下次开始监听时生效 |
 | `thresholdDb` | `-42` | 语音门限（dBFS）：RMS 低于它算安静；仅能量模式 |
 | `minSpeechMs` | `400` | 连续越过门限这么久才算开口；咳嗽、键盘、提示音挡在这；silero 下是它的最短语音时长 |
 | `silenceMs` | `600` | 安静这么久算一块说完；silero 下也是它的静音结束时长 |
@@ -134,9 +148,11 @@ pnpm install      # 或 npm install；原生件都是预编译的，不需要编
 | `maxEventsPerMinute` | `30` | 每 60 秒最多即时投递多少块，超出只归档；`0` = 不限 |
 | `saveDir` | 空 | 记录目录：留空 = 插件数据目录下的 `listen/`；每块一个 WAV 文件 + 一份 `index.json` |
 | `keep` | `200` | 保留条数：超出删最旧的记录（连同它那份音频文件）；事件库里的附件不动；`0` = 不清理 |
-| `pushToConsole` | `true` | 新块实时推到控制台「听到的」页 |
+| `pushToConsole` | `true` | 新块实时推到控制台「记录」页 |
 
 ### 切分：能量门限 vs 神经网络
+
+每一路来源可以单独选一种；门限、起说、收尾、单块上限、最短块这些参数是几路共用的一套。
 
 | | `energy`（默认） | `silero` | `firered` |
 | --- | --- | --- | --- |
@@ -150,9 +166,9 @@ pnpm install      # 或 npm install；原生件都是预编译的，不需要编
 - **silero**：`sileroModel` → `<bot 数据目录>/listen/silero_vad.onnx` → 包内 `assets/` → 自动下载（GitHub 发布资产）。
 - **firered**：`fireredModel` → `<bot 数据目录>/listen/firered/` → 包内 `assets/firered/` → 自动下载（官方仓库的 `fireredvad_stream_vad_with_cache.onnx` 与 `cmvn.ark`）。模型 2.3MB，推理在 CPU 上、按 10ms 帧流式跑；切分器是异步的，段通过回调交给 World。
 
-在「状态 → 听觉模块」选择对应项时会自动准备缺少的组件与模型；组件安装在数据目录的 `listen/runtime`，不修改扩展安装目录。准备成功才保存选择，失败保留原配置；模型下载一次后离线可用。
+在「来源」页给某一路选 `silero` 或 `firered` 时会自动准备缺少的组件与模型；组件安装在数据目录的 `listen/runtime`，不修改扩展安装目录。准备成功才保存选择，失败保留原选择；模型下载一次后离线可用。
 
-切换方式：配置组里把 `vad` 改成 `silero` 或 `firered`，**下次开始监听**生效；门限等参数是热改（切分器就地重建）。
+每路的选择记在配置里（应用写进 `apps` 的 `name=vad`，系统声音写 `vad`），**下次开始监听**生效；门限等参数是热改（切分器就地重建）。几路同时用 silero 时共用一个运行组件、各自一个推理实例。
 
 ### 音乐/说话区分（AED）
 
@@ -170,23 +186,25 @@ pnpm install      # 或 npm install；原生件都是预编译的，不需要编
 - 说话小声听不到：上调 `thresholdDb`（例如 `-38`）——但底噪也会跟着进来。
 - 一句话被切碎：调大 `silenceMs`（800–1200）。
 - 界面提示音、键盘声老成块：调大 `minUtteranceMs`。
-- 放音乐/看视频被刷屏：对路的办法是把 `vad` 换成 `silero` 或 `firered`（人声/音乐分得开）；能量模式下的替代是 `source: app` 只听需要那个应用、`record` 先归档、或调低 `maxEventsPerMinute`。
+- 放音乐/看视频被刷屏：给那一路换 `silero` 或 `firered`（人声/音乐分得开）；能量模式下的替代是只勾需要的应用、`record` 先归档、或调低 `maxEventsPerMinute`（几路共用一个额度）。
 
 ## 控制台页
 
-- **听到的**：听觉存下来的语音块（时间、时长、目标、大小、峰值、附件句柄），**重启也在**；可试听（读记录目录里那份文件）、复制句柄/路径、删除（连文件）、清空、打开文件夹、复制目录；页面顶部一行显示记录目录；听着的电平条实时走。
-- **状态**：单按钮开始/停止监听，选择系统声音或某个应用，以及「听觉模块」（能量门限 / Silero，和配置页的切分方式同步）。选择 Silero 自动准备模型与运行组件，监听期间禁止切换；错误就地显示。参数、目录、保留条数与限速统一在配置页查看。
+- **记录**：听觉存下来的语音块（时间、时长、来源、大小、峰值），**重启也在**；可试听（读记录目录里那份文件）、复制句柄/路径、删除（连文件）、清空、打开文件夹。
+- **来源**：系统声音与每个应用各一行，每行一个勾选框和一个切分方式下拉。勾选即开始监听，取消勾选即停止，全部取消就停；默认全不选。系统声音与应用互斥，应用可以多选。监听中换切分方式会先停、准备模型、再按原选择重启；每路的块数与错误就地显示。参数、目录、保留条数与限速统一在配置页查看。
+- **工具**：改写 `listen_act` / `listen_read` 给模型看的工具描述与各参数说明，可筛选、逐项恢复默认或整体恢复；保存的文字在下次会话构建工具表时生效，覆盖写在 bot 目录的 `worlds/listen/tool-text.json`。
 
-「状态」页的开关是**即时控制**；长期默认值在页面下方的配置组里。
+勾选框就是开关，**即时生效**；长期默认值在页面下方的配置组里。
 
 ## 采集的两条路
 
 - **系统声音**：WASAPI 环回，抓默认播放设备上的一切（和 OBS 的桌面音频同一条路）。任何 Windows 版本都可用。
-- **按应用**：进程树 loopback（`AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK`）。官方文档要求 Windows 10 build 20348（Server 2022 / Windows 11），社区实测 **Windows 10 2004+** 可用；更老的系统上会直接报错。浏览器要整个进程树一起抓（`getRoot` 会自动挑根进程），单个标签页的声音就是它某个子进程放的。
+- **按应用**：进程树 loopback（`AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK`）。官方文档要求 Windows 10 build 20348（Server 2022 / Windows 11），社区实测 **Windows 10 2004+** 可用；更老的系统上会直接报错。浏览器要整个进程树一起抓（`getRoot` 会自动挑根进程），单个标签页的声音就是它某个子进程放的。勾几个应用就开几条 process loopback，每路各自切分；系统声音与它们不并用。
+- **进程退出**：每 2 秒查一次各路的 PID。退出后那一路静默停止（不发事件，面板也不额外提示），正在说的尾巴照常送出；来源页那一行随状态自动取消勾选，全部退出就结束这一轮。列表里的应用行再次勾选时会按应用名重新解析 PID，应用换了 PID 也能接上。PID 在两次检查之间被复用的极端情况下可能漏检，那一路只是安静挂着，不会把新进程接进来——采集绑的是启动时的进程树。
 
 两个实话：
 
-- **系统环回会把桌宠自己的声音也听进去**（TTS、提示音从同一个设备放）。不想让它听见自己：优先用 `source: app` 把桌宠排除在外，或者听的时候别让它出声。
+- **系统环回会把桌宠自己的声音也听进去**（TTS、提示音从同一个设备放）。不想让它听见自己：改用 `source: apps` 勾需要的那几个应用，或者听的时候别让它出声。
 - 安静期间**没有数据**：原生件在声音低于 -70 dBFS 时根本不回调（这是它的省电策略），所以"说完没有"靠墙上时钟判断，不靠静音帧——本包的 VAD 就是这么做的。
 
 ## 自检
@@ -251,7 +269,7 @@ cortico-world-listen/
 
 ## 启用之后
 
-- 让桌宠开听：`{"action":"start"}`（`control: console-and-agent` 时）；或者你到控制台「听觉 → 状态」点「开始监听」。
+- 让桌宠开听：`{"action":"start","source":"system"}`（`control: console-and-agent` 时）；或者你到控制台「听觉 → 来源」勾选一个来源。
 - 听一段会议/视频后问它"刚才说了什么"：它会用 `listen_read action=recent` 找到块，把句柄交给 `stt_transcribe`，再回答你。
 - 只想录不想被打扰：`wake: record`，事后用 `listen_read action=recent`。
 
@@ -259,7 +277,7 @@ cortico-world-listen/
 
 - **能量模式分不出音乐**：默认的 `vad: energy` 把音乐/音效也当语音（能量上它们确实"一直在响"）；换 `vad: silero` 或 `firered` 即可分开（需要一次模型获取）。
 - **神经网络也有边界**：远场、强烈混响、多人同时说话时漏检会多起来；`sileroThreshold` / `fireredThreshold` 往下调能挽回一些。对歌曲/密集伴奏，FireRed 比 Silero 明显少误报（实测同一首歌：Silero@0.4 召回 60%、块内人声 91%；FireRed 流式召回 81%、96%）。
-- **两份音频，各管各的**：事件附件在 `data/media/`（`log:` 句柄那一条线，`stt_transcribe` 读它）；记录目录里还有听觉自己存的副本（面板试听读它）。清「媒体库」会丢 `log:` 那份（转写会报"附件已不在"）；「听到的」里删记录只丢自己那份，事件库不动。
+- **两份音频，各管各的**：事件附件在 `data/media/`（`log:` 句柄那一条线，`stt_transcribe` 读它）；记录目录里还有听觉自己存的副本（面板试听读它）。清「媒体库」会丢 `log:` 那份（转写会报"附件已不在"）；「记录」里删条目只丢自己那份，事件库不动。
 - **不做流式、不做实时字幕**：一次一块，几秒级延迟；实时对话该走桌宠自己的麦克风链路。
 - **只抓默认播放设备**（系统模式）；换输出设备（比如切到蓝牙）后要重新开始监听。
 - **不区分说话人**：一块里可能是几个人。

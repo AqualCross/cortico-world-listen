@@ -2,7 +2,7 @@
   "tools": [
     {
       "name": "listen_act",
-      "description": "Turn the Hearing world on or off. \"start\" begins capturing system audio (or one application) and delivers speech chunks as events; \"stop\" ends it. Each chunk arrives as an event with a WAV attachment; hand its handle to stt_transcribe when you want the words.",
+      "description": "Turn the Hearing world on or off. \"start\" captures system audio or one or more applications and delivers speech chunks as events; \"stop\" ends it. Each chunk arrives as an event with a WAV attachment; hand its handle to stt_transcribe when you want the words.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -18,13 +18,25 @@
             "type": "string",
             "enum": [
               "system",
-              "app"
+              "apps"
             ],
-            "description": "For start only: overrides the configured source, system audio or one application."
+            "description": "Required for start unless apps is given: system audio or applications."
           },
-          "app": {
+          "apps": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "For start with source=apps: process names or PID strings from listen_read action=source_list. Several entries listen to several applications at once; at least one is required."
+          },
+          "vad": {
             "type": "string",
-            "description": "For start with source=app: process name or PID string from listen_read action=source_list. Defaults to the configured application."
+            "enum": [
+              "energy",
+              "silero",
+              "firered"
+            ],
+            "description": "For start with source=apps: segmentation for every application listed here. Defaults to each application's configured choice."
           },
           "minutes": {
             "type": "integer",
@@ -39,13 +51,13 @@
         "act"
       ],
       "summary": {
-        "zh": "打开或关掉听觉：开始/停止监听系统声音或某个应用的音频。",
-        "en": "Turn hearing on or off: start/stop listening to system audio or one application."
+        "zh": "打开或关掉听觉：开始/停止监听系统声音或若干应用的音频。",
+        "en": "Turn hearing on or off: start/stop listening to system audio or several applications."
       }
     },
     {
       "name": "listen_read",
-      "description": "Read Hearing information without starting or stopping capture. source_list lists applications with Windows output audio sessions (including inactive sessions, not necessarily playing now), returning names, PIDs and window titles; use a PID string as app in listen_act action=start source=app. status reads listening state, target, counters, settings and last error. recent lists heard speech chunks and WAV attachment handles; hand a handle to stt_transcribe for text.",
+      "description": "Read Hearing information without starting or stopping capture. source_list lists applications with Windows output audio sessions (including inactive sessions, not necessarily playing now), returning names, PIDs and window titles; use PID strings in listen_act action=start source=apps apps=[...]. status reads listening state, each source, counters, settings and last error. recent lists heard speech chunks and WAV attachment handles; hand a handle to stt_transcribe for text.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -89,7 +101,7 @@
   "prompts": [
     {
       "key": "worlds.listen.env",
-      "title": "听觉",
+      "title": "提示词",
       "role": "envPrompt",
       "content": ""
     }

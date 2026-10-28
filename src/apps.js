@@ -6,6 +6,9 @@
  *
  * 选择根进程的判据是可测的纯函数 `chooseRoot`：优先「没有同名父进程」的根，
  * 根里再优先有窗口标题的（浏览器的主进程通常挂着窗口），最后退到最小 PID。
+ *
+ * 应用行的标题取该应用所有顶层窗口的标题（含隐藏窗口），由 `chooseTitle`
+ * 挑一个：根进程的窗口优先，过滤 IME / GDI+ / SMTC 等系统窗口。
  */
 import { execFile } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -13,14 +16,16 @@ import { fileURLToPath } from 'node:url';
 const NAME_OK = /^[A-Za-z0-9._ -]+$/;
 
 const sessionSource = fileURLToPath(new URL('./audio-sessions.cs', import.meta.url)).replace(/'/g, "''");
+const windowSource = fileURLToPath(new URL('./window-titles.cs', import.meta.url)).replace(/'/g, "''");
 const LIST_SCRIPT = [
   '[Console]::OutputEncoding=[System.Text.Encoding]::UTF8',
   '$OutputEncoding=[System.Text.Encoding]::UTF8',
   '$ErrorActionPreference="Stop"',
   `$audioIds = @(); $audioError = ''; try { Add-Type -Path '${sessionSource}'; $audioIds = @([ListenAudioSessions]::Read()) } catch { $audioError = $_.Exception.Message }`,
+  `$windows = @(); try { Add-Type -Path '${windowSource}'; $windows = @([ListenWindowTitles]::Read()) } catch { }`,
   '$titles = @{}; Get-Process -ErrorAction SilentlyContinue | ForEach-Object { $titles[[int]$_.Id] = [string]$_.MainWindowTitle }',
   '$items = @(Get-CimInstance Win32_Process | ForEach-Object { [pscustomobject]@{ name=([string]$_.Name -replace "\\.exe$", ""); pid=[int]$_.ProcessId; parent=[int]$_.ParentProcessId; title=[string]$titles[[int]$_.ProcessId]; audio=($audioIds -contains [uint32]$_.ProcessId) } })',
-  '[pscustomobject]@{ processes=$items; audioError=$audioError } | ConvertTo-Json -Compress -Depth 4',
+  '[pscustomobject]@{ processes=$items; windows=$windows; audioError=$audioError } | ConvertTo-Json -Compress -Depth 5',
 ].join('; ');
 
 /** 查一个进程名的全部实例（PID、父 PID、窗口标题）。 */
@@ -40,6 +45,30 @@ function resolveScript(name) {
     '  @($rows) | ConvertTo-Json -Compress',
     '}',
   ].join('; ');
+}
+
+/** 查一个 PID 现在的进程名；进程已经退出时报错。 */
+function pidScript(pid) {
+  return [
+    '[Console]::OutputEncoding=[System.Text.Encoding]::UTF8',
+    '$OutputEncoding=[System.Text.Encoding]::UTF8',
+    `$p = Get-Process -Id ${pid} -ErrorAction SilentlyContinue`,
+    'if (-not $p) { "null" } else { ConvertTo-Json -Compress -InputObject ([pscustomobject]@{ name=$p.ProcessName; title=[string]$p.MainWindowTitle }) }',
+  ].join('; ');
+}
+
+export async function resolvePid(pid, { timeoutMs = 10000 } = {}) {
+  const n = Number(pid);
+  if (!Number.isInteger(n) || n <= 0 || n > 0xffffffff) throw new Error(`PID「${pid}」不合形状。`);
+  const [info] = parseJson(await runPowerShell(pidScript(n), timeoutMs));
+  const name = typeof info?.name === 'string' ? info.name.trim() : '';
+  if (!name) throw new Error(`PID ${n} 已经退出，请刷新应用列表后重选。`);
+  return {
+    pid: n,
+    name,
+    title: typeof info?.title === 'string' ? info.title : '',
+    numeric: true,
+  };
 }
 
 function runPowerShell(script, timeoutMs) {
@@ -77,10 +106,66 @@ function parseJson(text) {
 export async function listApps({ timeoutMs = 20000 } = {}) {
   const [snapshot] = parseJson(await runPowerShell(LIST_SCRIPT, timeoutMs));
   if (!Array.isArray(snapshot?.processes)) throw new Error('应用列表返回了无效数据。');
-  return buildAppList(snapshot.processes, snapshot.audioError || '');
+  return buildAppList(
+    snapshot.processes,
+    snapshot.audioError || '',
+    Array.isArray(snapshot.windows) ? snapshot.windows : [],
+  );
 }
 
-export function buildAppList(rows, audioError = '') {
+const NOISE_CLASSES = new Set(['ime', 'msctfime ui', 'gdi+ hook window class', 'tooltips_class32', 'tooltip']);
+const NOISE_TITLES = /^(default ime|msctfime ui|gdi\+ window \(|mediaplayer smtc window)/i;
+
+/**
+ * Pick one title to show for an app. Visible windows win; then a title that
+ * looks like a document/player line ("Song - App"); then repeated titles
+ * (a song shows on both the player window and its tray icon) and length.
+ */
+export function chooseTitle(candidates = [], name = '') {
+  const appName = String(name ?? '').toLowerCase().replace(/\.exe$/, '');
+  const counts = new Map();
+  const rows = [];
+  for (const candidate of candidates) {
+    const title = String(candidate?.title ?? '').trim();
+    const cls = String(candidate?.cls ?? '').trim();
+    if (!title) continue;
+    if (cls && NOISE_CLASSES.has(cls.toLowerCase())) continue;
+    if (NOISE_TITLES.test(title)) continue;
+    if (cls && title === cls) continue;
+    const key = title.toLowerCase();
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+    rows.push({
+      title,
+      fromRoot: candidate?.fromRoot === true,
+      visible: candidate?.visible === true,
+      hasDash: /\s[-–—]\s/.test(title),
+      isAppName: key === appName,
+    });
+  }
+  if (!rows.length) return '';
+  const score = (row) => [
+    row.fromRoot ? 1 : 0,
+    row.visible ? 1 : 0,
+    row.isAppName ? 0 : 1,
+    row.hasDash ? 1 : 0,
+    counts.get(row.title.toLowerCase()) ?? 0,
+    row.title.length,
+  ];
+  let best = rows[0];
+  for (const row of rows.slice(1)) {
+    const a = score(row);
+    const b = score(best);
+    for (let i = 0; i < a.length; i += 1) {
+      if (a[i] !== b[i]) {
+        if (a[i] > b[i]) best = row;
+        break;
+      }
+    }
+  }
+  return best.title;
+}
+
+export function buildAppList(rows, audioError = '', windows = []) {
   if (audioError) throw new Error(`音频会话查询失败：${audioError}`);
   const processes = new Map();
   for (const row of rows) {
@@ -90,6 +175,7 @@ export function buildAppList(rows, audioError = '') {
     processes.set(pid, { name, pid, parent: Number(row.parent), title: typeof row?.title === 'string' ? row.title : '', audio: Boolean(row.audio) });
   }
   const roots = new Map();
+  const rootOf = new Map();
   for (const process of processes.values()) {
     let root = process;
     const visited = new Set([root.pid]);
@@ -99,12 +185,35 @@ export function buildAppList(rows, audioError = '') {
       visited.add(parent.pid);
       root = parent;
     }
+    rootOf.set(process.pid, root.pid);
     const app = roots.get(root.pid) || { name: root.name, pid: root.pid, title: root.title, audio: false };
     app.audio ||= process.audio;
-    if (!app.title && process.title) app.title = process.title;
     roots.set(root.pid, app);
   }
+
+  const candidates = new Map();
+  const add = (pid, candidate) => {
+    if (!pid) return;
+    const list = candidates.get(pid);
+    if (list) list.push(candidate);
+    else candidates.set(pid, [candidate]);
+  };
+  for (const process of processes.values()) {
+    if (process.title) {
+      add(rootOf.get(process.pid), { title: process.title, cls: '', visible: true, fromRoot: rootOf.get(process.pid) === process.pid });
+    }
+  }
+  for (const win of windows) {
+    const pid = Number(win?.pid);
+    const rootPid = rootOf.get(pid);
+    if (!rootPid) continue;
+    add(rootPid, { title: win?.title, cls: win?.cls, visible: win?.visible, fromRoot: pid === rootPid });
+  }
+
   const apps = [...roots.values()].filter((app) => app.audio);
+  for (const app of apps) {
+    app.title = chooseTitle(candidates.get(app.pid) ?? [], app.name);
+  }
   apps.sort((a, b) => Number(b.audio) - Number(a.audio) || Number(Boolean(b.title)) - Number(Boolean(a.title)) || a.name.localeCompare(b.name, 'en') || a.pid - b.pid);
   return apps;
 }
@@ -136,9 +245,7 @@ export async function resolveApp(target, { timeoutMs = 20000 } = {}) {
   const raw = typeof target === 'string' ? target.trim().replace(/^["']|["']$/g, '') : '';
   if (!raw) throw new Error('应用是空的：填进程名（如 chrome.exe）或 PID。');
   if (/^\d+$/.test(raw)) {
-    const pid = Number(raw);
-    if (!Number.isInteger(pid) || pid <= 0 || pid > 0xffffffff) throw new Error(`PID「${raw}」不合形状。`);
-    return { pid, name: `pid:${pid}`, title: '', numeric: true };
+    return resolvePid(raw, { timeoutMs });
   }
   if (!NAME_OK.test(raw)) throw new Error(`应用名「${raw}」里有不认识的字符：只接受字母、数字、空格、. _ -。`);
   const rows = parseJson(await runPowerShell(resolveScript(raw), timeoutMs));

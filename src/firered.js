@@ -123,7 +123,7 @@ export async function ensureFireRedModel({
   const state = fireRedModelState({ cfgPath, dataDir, packageDir, botDir });
   if (state.exists) return state;
   if (state.source === 'config-missing') {
-    throw new Error(`worlds.listen.fireredModel 指的模型不在：${state.path}（同目录下还需要 ${FIRERED_CMVN_FILE}）。改配置、清掉它，或在控制台「状态」页获取模型。`);
+    throw new Error(`worlds.listen.fireredModel 指的模型不在：${state.path}（同目录下还需要 ${FIRERED_CMVN_FILE}）。改配置、清掉它，或在控制台「来源」页选一下 firered 重新准备。`);
   }
   const dir = cacheDir(dataDir);
   log?.info?.('听觉：开始下载 FireRed 模型', { dir });

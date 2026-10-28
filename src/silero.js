@@ -153,11 +153,11 @@ export async function ensureSileroModel({
   if (state.exists) return state;
   const cfg = resolveModelPath(cfgPath, botDir);
   if (cfg) {
-    throw new Error(`worlds.listen.sileroModel 指的模型不在：${cfg}。改配置、清掉它，或在控制台「状态」页获取模型。`);
+    throw new Error(`worlds.listen.sileroModel 指的模型不在：${cfg}。改配置、清掉它，或在控制台「来源」页选一下 silero 自动准备。`);
   }
   const target = cacheModelPath(dataDir);
   if (!allowDownload) {
-    throw new Error(`silero 模型还没下载（缓存位置：${target}）。到控制台「听觉 → 状态」点「获取 Silero 模型」，或设置 worlds.listen.sileroModel 指向本地文件。`);
+    throw new Error(`silero 模型还没下载（缓存位置：${target}）。到控制台「听觉 → 来源」给某一路选 silero 自动准备，或设置 worlds.listen.sileroModel 指向本地文件。`);
   }
   const doFetch = typeof fetchImpl === 'function' ? fetchImpl : fetch;
   onProgress('downloading-model');
@@ -168,7 +168,7 @@ export async function ensureSileroModel({
     buf = Buffer.from(await res.arrayBuffer());
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
-    throw new Error(`下载 silero 模型失败（${detail}）。可以：改 worlds.listen.sileroModel 指向本地的 silero_vad.onnx（${SILERO_MODEL_URL}），或在控制台「状态」页重试。`);
+    throw new Error(`下载 silero 模型失败（${detail}）。可以：改 worlds.listen.sileroModel 指向本地的 silero_vad.onnx（${SILERO_MODEL_URL}），或在控制台「来源」页重新选一次 silero。`);
   }
   if (buf.length < minBytes) {
     throw new Error(`下载到的 silero 模型只有 ${buf.length} 字节，不像真模型（${SILERO_MODEL_URL}）。`);
