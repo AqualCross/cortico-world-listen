@@ -31,6 +31,23 @@ export const FIRERED_CMVN_FILE = 'cmvn.ark';
 export const FIRERED_MODEL_MIN_BYTES = 1_000_000;
 export const FIRERED_CMVN_MIN_BYTES = 500;
 
+/**
+ * 模型只有 2~3 MB，VAD 还要每 20 ms 推一次。onnxruntime 默认按物理核开线程池、
+ * 且线程空闲时自旋等活——监听一直有声音时几十个核都在空转（实测默认 30 核，
+ * 单线程关自旋 0.05 核，单帧延迟还略低）。
+ */
+export const FIRERED_SESSION_OPTIONS = {
+  intraOpNumThreads: 1,
+  interOpNumThreads: 1,
+  executionMode: 'sequential',
+  extra: {
+    session: {
+      intra_op: { allow_spinning: '0' },
+      inter_op: { allow_spinning: '0' },
+    },
+  },
+};
+
 /** 加载 ONNX 运行时；失败时讲清楚可选依赖与重启。 */
 export function loadOnnxRuntime() {
   try {
@@ -275,7 +292,7 @@ export class FireRedSegmenter {
     if (!opts.modelPath) throw new Error('FireRed 切分器需要模型路径。');
     if (!opts.cmvnPath) throw new Error('FireRed 切分器需要 cmvn.ark。');
     const ort = opts.ort ?? loadOnnxRuntime();
-    const session = opts.session ?? await ort.InferenceSession.create(opts.modelPath);
+    const session = opts.session ?? await ort.InferenceSession.create(opts.modelPath, FIRERED_SESSION_OPTIONS);
     const cmvn = cmvnFromMatrix(parseCmvnMatrix(readFileSync(opts.cmvnPath)));
     return new FireRedSegmenter({ ...opts, ort, session, cmvn });
   }

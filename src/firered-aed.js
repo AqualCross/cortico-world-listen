@@ -12,6 +12,7 @@ import {
   FIRERED_CMVN_FILE,
   FIRERED_CMVN_MIN_BYTES,
   FIRERED_CMVN_URL,
+  FIRERED_SESSION_OPTIONS,
   downloadFile,
   loadOnnxRuntime,
   writeAtomic,
@@ -120,7 +121,7 @@ export class FireRedAedClassifier {
     if (!modelPath) throw new Error('FireRed AED 需要模型路径。');
     if (!cmvnPath) throw new Error('FireRed AED 需要 cmvn.ark。');
     const runtime = ort ?? loadOnnxRuntime();
-    const sess = session ?? await runtime.InferenceSession.create(modelPath);
+    const sess = session ?? await runtime.InferenceSession.create(modelPath, FIRERED_SESSION_OPTIONS);
     const cmvn = cmvnFromMatrix(parseCmvnMatrix(readFileSync(cmvnPath)));
     return new FireRedAedClassifier({ ort: runtime, session: sess, cmvn });
   }
